@@ -12,9 +12,9 @@ struct SettingsView: View {
     @Binding var streams: [SyphonStream]
     @StateObject private var syphonManager: SyphonManager
     
-    init(streams: Binding<[SyphonStream]>, device: MTLDevice) {
+    init(streams: Binding<[SyphonStream]>) {
         self._streams = streams
-        self._syphonManager = StateObject(wrappedValue: SyphonManager(device: device))
+        self._syphonManager = StateObject(wrappedValue: SyphonManager())
     }
     
     var body: some View {
@@ -23,7 +23,9 @@ struct SettingsView: View {
                 StreamSelectorRow(
                     stream: $stream,
                     availableServers: syphonManager.availableServers,
-                    onAdd: { streams.append(SyphonStream(serverName: "")) },
+                    onAdd: {
+                        streams.append(SyphonStream(serverName: ""))
+                    },
                     onRemove: {
                         if let index = streams.firstIndex(where: { $0.id == stream.id }) {
                             // Cleanup existing client if any
@@ -49,7 +51,6 @@ struct SettingsView: View {
                 } else if streams[index].client == nil {
                     // Create new client
                     streams[index].client = syphonManager.createClient(for: stream.serverName)
-//                    streams[index].client?.start()
                 }
             }
         }

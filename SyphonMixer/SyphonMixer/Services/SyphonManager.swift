@@ -11,12 +11,13 @@ import Metal
 
 class SyphonManager: ObservableObject {
     @Published var availableServers: [String] = []
-    private let device: MTLDevice
+    @Published var streams: [SyphonStream] = []
+    let device: MTLDevice = MTLCreateSystemDefaultDevice()!
     private var serverBrowser: SyphonServerDirectory?
     
-    init(device: MTLDevice) {
-        self.device = device
+    init() {
         setupServerBrowser()
+        streams.append(SyphonStream(serverName: ""))
     }
     
     private func setupServerBrowser() {
@@ -79,7 +80,7 @@ class SyphonManager: ObservableObject {
         }
         
         // Create Syphon client
-        let client = SyphonMetalClient(serverDescription: serverInfo, options: nil)
+        let client = SyphonMetalClient(serverDescription: serverInfo, device: device, options: nil)
         return client
     }
     

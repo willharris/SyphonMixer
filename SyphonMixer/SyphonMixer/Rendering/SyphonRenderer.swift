@@ -4,17 +4,24 @@
 //
 //  Created by William Harris on 19.11.2024.
 //
+import os
 
 import Metal
 import Syphon
 import MetalKit
 
 class SyphonRenderer {
+    let logger = Logger()
+    
     let device: MTLDevice
     let pipelineState: MTLRenderPipelineState
     let vertexBuffer: MTLBuffer
     let indexBuffer: MTLBuffer
     
+    private let debugTestPattern = false
+    private var frameCount = 0
+    private var currentColor = float4(1.0, 0.0, 0.0, 1.0)
+
     init(device: MTLDevice) {
         self.device = device
         
@@ -42,7 +49,7 @@ class SyphonRenderer {
         // Create shader library and pipeline state
         let library = try! device.makeLibrary(source: MetalShaders.shaderSource, options: nil)
         let vertexFunction = library.makeFunction(name: "vertex_main")
-        let fragmentFunction = library.makeFunction(name: "fragment_main")
+        let fragmentFunction = library.makeFunction(name: debugTestPattern ? "fragment_main_test" : "fragment_main")
         
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = vertexFunction
@@ -71,26 +78,57 @@ class SyphonRenderer {
     func render(streams: [SyphonStream],
                 in view: MTKView,
                 commandBuffer: MTLCommandBuffer,
-                renderPassDescriptor: MTLRenderPassDescriptor) {
+                renderPassDescriptor: MTLRenderPassDescriptor)
+    {
         let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
         renderEncoder.setRenderPipelineState(pipelineState)
         renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
-        
-        // Render each stream
-        for stream in streams {
-            guard let texture = stream.client?.newFrameImage else { continue }
-            
-            renderEncoder.setFragmentTexture(texture(), index: 0)
-            var alpha = Float(stream.alpha)
-            renderEncoder.setFragmentBytes(&alpha, length: MemoryLayout<Float>.stride, index: 0)
-            
-            renderEncoder.drawIndexedPrimitives(type: .triangle,
-                                              indexCount: 6,
-                                              indexType: .uint16,
-                                              indexBuffer: indexBuffer,
-                                              indexBufferOffset: 0)
+        frameCount += 1
+
+        if debugTestPattern {
+            _setTestPatternColour()
+            _doRender(renderEncoder, bytes: &currentColor, length: MemoryLayout<float4>.stride)
+        } else {
+            // Render each stream
+            for stream in streams {
+                guard let client = stream.client else { continue }
+
+                if let tex = client.newFrameImage() {
+                    if frameCount % 120 == 0 {
+                        print("\(self.frameCount): \(stream.serverName): \(ObjectIdentifier(client)) \(ObjectIdentifier(tex)): width: \(tex.width), height: \(tex.height)")
+                    }
+                    renderEncoder.setFragmentTexture(tex, index: 0)
+                    var alpha = Float(stream.alpha)
+                    _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
+                } else {
+                    print("Failed to get frame texture")
+                }
+            }
         }
         
         renderEncoder.endEncoding()
     }
+    
+    // Create a test render method
+    // Use "fragment_main_test" shader function to render a test pattern - set above as fragmentFunction
+    private func _setTestPatternColour() {
+        // Change color every 60 frames
+        if frameCount % 60 == 0 {
+            currentColor = float4(
+                Float.random(in: 0...1),
+                Float.random(in: 0...1),
+                Float.random(in: 0...1),
+                1.0
+            )
+        }
+    }
+    
+    private func _doRender(_ renderEncoder: MTLRenderCommandEncoder, bytes: UnsafeRawPointer, length: Int) {
+        renderEncoder.setFragmentBytes(bytes, length: length, index: 0)
+        renderEncoder.drawIndexedPrimitives(type: .triangle,
+                                            indexCount: 6,
+                                            indexType: .uint16,
+                                            indexBuffer: indexBuffer,
+                                            indexBufferOffset: 0)
+     }
 }

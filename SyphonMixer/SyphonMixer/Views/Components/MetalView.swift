@@ -5,17 +5,19 @@
 //  Created by William Harris on 19.11.2024.
 //
 
+import os
+
 import SwiftUI
 import MetalKit
 
 struct MetalView: NSViewRepresentable {
-    var streams: [SyphonStream]
+    @ObservedObject var manager: SyphonManager
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
     private var renderer: SyphonRenderer!
 
-    public init(streams: [SyphonStream], device: MTLDevice, commandQueue: MTLCommandQueue) {
-        self.streams = streams
+    public init(manager: SyphonManager, device: MTLDevice, commandQueue: MTLCommandQueue) {
+        self.manager = manager
         self.device = device
         self.commandQueue = commandQueue
     }
@@ -29,7 +31,7 @@ struct MetalView: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: MTKView, context: Context) {
-        context.coordinator.streams = streams
+        context.coordinator.streams = manager.streams
     }
     
     func makeCoordinator() -> Coordinator {
@@ -42,7 +44,7 @@ struct MetalView: NSViewRepresentable {
         
         init(_ parent: MetalView) {
             self.parent = parent
-            self.streams = parent.streams
+            self.streams = parent.manager.streams
         }
         
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {

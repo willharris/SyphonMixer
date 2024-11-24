@@ -9,20 +9,20 @@ import SwiftUI
 import Metal
 
 struct ContentView: View {
-    @Binding var streams: [SyphonStream]
     @State private var isFullScreen = false
     
     let device: MTLDevice
+    let manager: SyphonManager
     let commandQueue: MTLCommandQueue
     
-    init(streams: Binding<[SyphonStream]>, device: MTLDevice) {
-        self._streams = streams
-        self.device = device
+    init(manager: SyphonManager) {
+        self.manager = manager
+        self.device = manager.device
         self.commandQueue = device.makeCommandQueue()!
     }
     
     var body: some View {
-        MetalView(streams: streams, device: device, commandQueue: commandQueue)
+        MetalView(manager: manager, device: device, commandQueue: commandQueue)
             .ignoresSafeArea()
     }
 }
