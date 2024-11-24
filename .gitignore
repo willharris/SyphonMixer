@@ -1,0 +1,11 @@
+# Xcode
+
+xcuserdata/
+
+## App packaging
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# OS generated files
+**/.DS_Store
