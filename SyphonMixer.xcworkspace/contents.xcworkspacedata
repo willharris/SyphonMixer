@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "group:SyphonMixer/SyphonMixer.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:SyphonImageServer/SyphonImageServer.xcodeproj">
+   </FileRef>
+   <FileRef
+      location = "group:Syphon-Framework/Syphon.xcodeproj">
+   </FileRef>
+</Workspace>
