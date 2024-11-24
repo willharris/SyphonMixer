@@ -40,19 +40,36 @@ struct SettingsView: View {
         }
         .padding()
         .onChange(of: streams) { oldStreams, newStreams in
-            // Update clients when stream selections change
-            for (index, stream) in newStreams.enumerated() {
+            // Create a local copy to avoid modifying while iterating
+            var updatedStreams = newStreams
+                        
+            for index in updatedStreams.indices {
+                let stream = updatedStreams[index]
+                            
                 if stream.serverName.isEmpty {
                     // Clear existing client if any
-                    if let client = streams[index].client {
+                    if let client = stream.client {
                         client.stop()
-                        streams[index].client = nil
+                        updatedStreams[index].client = nil
                     }
-                } else if streams[index].client == nil {
-                    // Create new client
-                    streams[index].client = syphonManager.createClient(for: stream.serverName)
+                } else {
+                    // Check if we need to create or update the client
+                    let oldStream = oldStreams.first { $0.id == stream.id }
+                                
+                    if oldStream?.serverName != stream.serverName {
+                        // Server name changed, stop old client if it exists
+                        if let client = stream.client {
+                            client.stop()
+                        }
+                        // Create new client
+                        updatedStreams[index].client = syphonManager
+                            .createClient(for: stream.serverName)
+                    }
                 }
             }
+                        
+            // Update the streams binding with our modified version
+            streams = updatedStreams
         }
         .onDisappear {
             // Cleanup when view disappears

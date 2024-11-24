@@ -13,12 +13,14 @@ struct SyphonMixerApp: App {
     @StateObject private var syphonManager = SyphonManager()
 
     var body: some Scene {
-        WindowGroup("Syphon Mixer") {
+        Window("Syphon Mixer", id: "main") {
             ContentView(
                 manager: syphonManager
             )
         }
-        
+        .windowStyle(.hiddenTitleBar)
+        .windowToolbarStyle(.unified)
+                
         Settings {
             SettingsView(
                 streams: Binding(
@@ -28,6 +30,13 @@ struct SyphonMixerApp: App {
             )
             .frame(width: 400, height: 400)
         }
+        .windowStyle(.titleBar)
+        .windowResizability(.contentSize)
+        .commands {
+            // Hack to prevent the settings window from interfering with main window full-screen shortcut
+            CommandGroup(replacing: .windowSize) { }
+        }
+        
 
     }
 }

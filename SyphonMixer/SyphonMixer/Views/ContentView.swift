@@ -24,6 +24,8 @@ struct ContentView: View {
     var body: some View {
         MetalView(manager: manager, device: device, commandQueue: commandQueue)
             .ignoresSafeArea()
+            .navigationTitle("Syphon Mixer")
+        
     }
 }
 
