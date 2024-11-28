@@ -27,6 +27,7 @@ struct MetalView: NSViewRepresentable {
         mtkView.delegate = context.coordinator
         mtkView.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         mtkView.colorPixelFormat = .bgra8Unorm
+        mtkView.framebufferOnly = false
         return mtkView
     }
     
@@ -55,16 +56,20 @@ struct MetalView: NSViewRepresentable {
         
         func draw(in view: MTKView) {
             guard let drawable = view.currentDrawable,
-                  let commandBuffer = parent.commandQueue.makeCommandBuffer(),
-                  let renderPassDescriptor = view.currentRenderPassDescriptor else { return }
+                  let renderCommandBuffer = parent.commandQueue.makeCommandBuffer(),
+                  let computeCommandBuffer = parent.commandQueue.makeCommandBuffer(),
+                  let renderPassDescriptor = view.currentRenderPassDescriptor else {
+                return
+            }
             
             parent.renderer.render(streams: streams,
-                           in: view,
-                           commandBuffer: commandBuffer,
-                           renderPassDescriptor: renderPassDescriptor)
+                                   in: view,
+                                   renderCommandBuffer: renderCommandBuffer,
+                                   renderPassDescriptor: renderPassDescriptor,
+                                   computeCommandBuffer: computeCommandBuffer)
             
-            commandBuffer.present(drawable)
-            commandBuffer.commit()
+            renderCommandBuffer.present(drawable)
+            renderCommandBuffer.commit()
         }
     }
 }

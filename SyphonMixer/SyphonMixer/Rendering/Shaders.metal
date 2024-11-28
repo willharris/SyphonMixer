@@ -39,33 +39,21 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     return float4(color.rgb, color.a * alpha);
 }
 
-struct LuminanceData {
-    atomic_float totalLuminance;
-    atomic_uint pixelCount;
-    float debugMaxLuminance;  // Add debug values
-    float debugMinLuminance;
-    uint debugWidth;
-    uint debugHeight;
-};
+kernel void compute_luminance(texture2d<float, access::sample> inputTexture [[ texture(0) ]],
+                              device float *output [[ buffer(0) ]],
+                              uint2 gid [[ thread_position_in_grid ]],
+                              uint2 textureSize [[ threads_per_grid ]]) {
+    // Normalize the gid based on the texture size
+    float2 uv = float2(gid) / float2(textureSize);
 
-kernel void calculateLuminance(texture2d<float, access::read> inputTexture [[texture(0)]],
-                             device LuminanceData* data [[buffer(0)]],
-                             uint2 gid [[thread_position_in_grid]]) {
-    if (gid.x >= inputTexture.get_width() || gid.y >= inputTexture.get_height()) {
-        return;
-    }
-    
-    float4 color = inputTexture.read(gid);
-    float pixelLuminance = dot(color.rgb, float3(0.2126, 0.7152, 0.0722));
-    
-    // Store debug info for the first thread
+    // Sample the texture to get the pixel color
+    float4 pixelColor = inputTexture.sample(sampler(coord::normalized), uv);
+
+    // Compute luminance (using standard formula)
+    float luminance = 0.2126 * pixelColor.r + 0.7152 * pixelColor.g + 0.0722 * pixelColor.b;
+
+    // Example: Write one luminance value (for gid 0,0 only, as a placeholder)
     if (gid.x == 0 && gid.y == 0) {
-        data->debugWidth = inputTexture.get_width();
-        data->debugHeight = inputTexture.get_height();
-        data->debugMaxLuminance = -1.0;
-        data->debugMinLuminance = 1000.0;
+        *output = luminance; // Write the computed luminance
     }
-    
-    atomic_fetch_add_explicit(&data->totalLuminance, pixelLuminance, memory_order_relaxed);
-    atomic_fetch_add_explicit(&data->pixelCount, 1u, memory_order_relaxed);
 }

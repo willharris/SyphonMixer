@@ -23,10 +23,11 @@ class SyphonRenderer {
     let logger = Logger()
     let device: MTLDevice
     let library: MTLLibrary
-    let pipelineState: MTLRenderPipelineState
+    let renderPipelineState: MTLRenderPipelineState
     let vertexBuffer: MTLBuffer
     let indexBuffer: MTLBuffer
-    let luminancePipelineState: MTLComputePipelineState
+    let luminanceBuffer: MTLBuffer
+    let computePipelineState: MTLComputePipelineState
     
     private let debugTestPattern = false
     private let logFreq = 120
@@ -50,7 +51,12 @@ class SyphonRenderer {
             0, 2, 3
         ]
         
-        vertexBuffer = device.makeBuffer(bytes: vertices,
+        var luminance: Float = 0.0
+        luminanceBuffer = device.makeBuffer(bytes: &luminance,
+                                            length: MemoryLayout<Float>.size,
+                                            options: .storageModeShared)!
+        
+       vertexBuffer = device.makeBuffer(bytes: vertices,
                                        length: vertices.count * MemoryLayout<Float>.stride,
                                        options: [])!
         
@@ -64,6 +70,9 @@ class SyphonRenderer {
         // Setup render pipeline
         let vertexFunction = library.makeFunction(name: "vertex_main")
         let fragmentFunction = library.makeFunction(name: debugTestPattern ? "fragment_main_test" : "fragment_main")
+        let luminanceFunction = library.makeFunction(name: "compute_luminance")!
+        
+        computePipelineState = try! device.makeComputePipelineState(function: luminanceFunction)
         
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = vertexFunction
@@ -86,42 +95,16 @@ class SyphonRenderer {
         pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
         pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         
-        pipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
-        
-        // Setup compute pipeline for luminance calculation
-        guard let luminanceFunction = library.makeFunction(name: "calculateLuminance") else {
-            fatalError("Failed to create luminance function")
-        }
-        luminancePipelineState = try! device.makeComputePipelineState(function: luminanceFunction)
+        renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
     
-    private func calculateLuminance(texture: MTLTexture, computeEncoder: MTLComputeCommandEncoder) -> MTLBuffer {
-        // Debug texture info
-        if frameCount % logFreq == 0 {
-            print("""
-                Texture Debug Info:
-                - Width: \(texture.width)
-                - Height: \(texture.height)
-                - Pixel Format: \(texture.pixelFormat.rawValue)
-                - Usage: \(texture.usage.rawValue)
-                - Storage Mode: \(texture.storageMode.rawValue)
-                - Is Framebuffer Only: \(texture.isFramebufferOnly)
-            """)
-        }
+    private func calculateLuminance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> Float {
+        let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
         
-        let resultBuffer = device.makeBuffer(
-            length: MemoryLayout<LuminanceData>.size,
-            options: .storageModeShared
-        )!
-        
-        // Initialize the buffer with zeros
-        let data = resultBuffer.contents().assumingMemoryBound(to: LuminanceData.self)
-        data.pointee = LuminanceData()
-        
-        computeEncoder.setComputePipelineState(luminancePipelineState)
+        computeEncoder.setComputePipelineState(computePipelineState)
         computeEncoder.setTexture(texture, index: 0)
-        computeEncoder.setBuffer(resultBuffer, offset: 0, index: 0)
-        
+        computeEncoder.setBuffer(luminanceBuffer, offset: 0, index: 0)
+
         let w = texture.width
         let h = texture.height
         
@@ -132,23 +115,23 @@ class SyphonRenderer {
             depth: 1
         )
         
-        if frameCount % logFreq == 0 {
-            print("""
-                Compute Debug Info:
-                - Thread Groups: (\(threadGroups.width), \(threadGroups.height))
-                - Threads Per Group: (\(threadGroupSize.width), \(threadGroupSize.height))
-                - Total Threads: (\(threadGroups.width * threadGroupSize.width), \(threadGroups.height * threadGroupSize.height))
-            """)
-        }
-        
         computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
         
-        return resultBuffer
+        computeEncoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        let luminancePointer = luminanceBuffer.contents().bindMemory(to: Float.self, capacity: 1)
+        let luminance = luminancePointer.pointee
+        return luminance
     }
+    
     func render(streams: [SyphonStream],
                 in view: MTKView,
-                commandBuffer: MTLCommandBuffer,
-                renderPassDescriptor: MTLRenderPassDescriptor)
+                renderCommandBuffer: MTLCommandBuffer,
+                renderPassDescriptor: MTLRenderPassDescriptor,
+                computeCommandBuffer: MTLCommandBuffer)
     {
         var textures = streams.compactMap { stream -> [String: Any]? in
             guard let client = stream.client,
@@ -160,22 +143,16 @@ class SyphonRenderer {
         
         // Process luminance calculations
         if !textures.isEmpty {
-            guard let computeEncoder = commandBuffer.makeComputeCommandEncoder() else {
-                return
+            for i in 0..<textures.count {
+                let tex = textures[i]["tex"] as! MTLTexture
+                let lum = calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
+                textures[i]["lum"] = lum
             }
-            
-            for index in 0..<textures.count {
-                let tex = textures[index]["tex"] as! MTLTexture
-                let resultBuffer = calculateLuminance(texture: tex, computeEncoder: computeEncoder)
-                textures[index]["lumBuffer"] = resultBuffer
-            }
-            
-            computeEncoder.endEncoding()
         }
         
         // Render textures
-        let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
-        renderEncoder.setRenderPipelineState(pipelineState)
+        let renderEncoder = renderCommandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
+        renderEncoder.setRenderPipelineState(renderPipelineState)
         renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         
         if debugTestPattern {
@@ -185,27 +162,11 @@ class SyphonRenderer {
             for texture in textures {
                 let tex = texture["tex"] as! MTLTexture
                 var alpha = texture["alpha"] as! Float
+                let lum = texture["lum"] as! Float
                 
-                // In your render function, modify the luminance reading:
-                if frameCount % logFreq == 0,
-                       let lumBuffer = texture["lumBuffer"] as? MTLBuffer {
-                        let data = lumBuffer.contents().assumingMemoryBound(to: LuminanceData.self)
-                        let totalLuminance = data.pointee.totalLuminance
-                        let pixelCount = data.pointee.pixelCount
-                        let debugWidth = data.pointee.debugWidth
-                        let debugHeight = data.pointee.debugHeight
-                        
-                        print("""
-                            \(frameCount): \(ObjectIdentifier(tex)):
-                            width: \(tex.width), height: \(tex.height)
-                            debugWidth: \(debugWidth), debugHeight: \(debugHeight)
-                            totalLuminance: \(totalLuminance)
-                            pixelCount: \(pixelCount)
-                            averageLuminance: \(pixelCount > 0 ? totalLuminance / Float(pixelCount) : 0.0)
-                            """)
-                    }
-
-                
+                if frameCount % logFreq == 0 {
+                    print("\(ObjectIdentifier(tex)) alpha: \(alpha) lum: \(lum)")
+                }
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
             }
