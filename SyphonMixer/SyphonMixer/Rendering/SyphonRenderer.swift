@@ -19,6 +19,11 @@ struct LuminanceData {
     var debugHeight: UInt32 = 0
 }
 
+struct AtomicSum {
+    var sumLum: Float
+    var sumLumSquared: Float
+}
+
 class SyphonRenderer {
     let logger = Logger()
     let device: MTLDevice
@@ -27,10 +32,11 @@ class SyphonRenderer {
     let vertexBuffer: MTLBuffer
     let indexBuffer: MTLBuffer
     let luminanceBuffer: MTLBuffer
-    let computePipelineState: MTLComputePipelineState
-    
+    let luminancePipelineState: MTLComputePipelineState
+    let luminanceVariancePipelineState: MTLComputePipelineState
+
     private let debugTestPattern = false
-    private let logFreq = 120
+    private let logFreq = 30
     private var frameCount = 0
     private var currentColor = float4(1.0, 0.0, 0.0, 1.0)
     private var hue: Float = 0.0
@@ -71,9 +77,11 @@ class SyphonRenderer {
         let vertexFunction = library.makeFunction(name: "vertex_main")
         let fragmentFunction = library.makeFunction(name: debugTestPattern ? "fragment_main_test" : "fragment_main")
         let luminanceFunction = library.makeFunction(name: "compute_luminance")!
-        
-        computePipelineState = try! device.makeComputePipelineState(function: luminanceFunction)
-        
+        let luminanceVarianceFunction = library.makeFunction(name: "compute_luminance_variance")!
+
+        luminancePipelineState = try! device.makeComputePipelineState(function: luminanceFunction)
+        luminanceVariancePipelineState = try! device.makeComputePipelineState(function: luminanceVarianceFunction)
+
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = vertexFunction
         pipelineDescriptor.fragmentFunction = fragmentFunction
@@ -101,7 +109,7 @@ class SyphonRenderer {
     private func calculateLuminance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> Float {
         let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
         
-        computeEncoder.setComputePipelineState(computePipelineState)
+        computeEncoder.setComputePipelineState(luminancePipelineState)
         computeEncoder.setTexture(texture, index: 0)
         computeEncoder.setBuffer(luminanceBuffer, offset: 0, index: 0)
 
@@ -127,6 +135,123 @@ class SyphonRenderer {
         return luminance
     }
     
+    private func calculateLuminanceVariance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> Float {
+        let atomicSumSize = MemoryLayout<AtomicSum>.stride
+        let atomicSumBuffer = device.makeBuffer(length: atomicSumSize, options: .storageModeShared)!
+        
+        let atomicSumPointer = atomicSumBuffer.contents().bindMemory(to: AtomicSum.self, capacity: 1)
+        atomicSumPointer.pointee.sumLum = 0.0
+        atomicSumPointer.pointee.sumLumSquared = 0.0
+        
+        var width: UInt32 = UInt32(texture.width)
+        var height: UInt32 = UInt32(texture.height)
+        let widthBuffer = device.makeBuffer(bytes: &width, length: MemoryLayout<UInt32>.size, options: [])
+        let heightBuffer = device.makeBuffer(bytes: &height, length: MemoryLayout<UInt32>.size, options: [])
+        
+        let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
+        
+        computeEncoder.setComputePipelineState(luminanceVariancePipelineState)
+        computeEncoder.setTexture(texture, index: 0)
+        computeEncoder.setBuffer(atomicSumBuffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(widthBuffer, offset: 0, index: 1)
+        computeEncoder.setBuffer(heightBuffer, offset: 0, index: 2)
+        
+        let threadGroupWidth = 16
+        let threadGroupHeight = 16
+        let threadsPerGroup = MTLSizeMake(threadGroupWidth, threadGroupHeight, 1)
+        let numThreadgroups = MTLSizeMake(
+            (texture.width  + threadGroupWidth  - 1) / threadGroupWidth,
+            (texture.height + threadGroupHeight - 1) / threadGroupHeight,
+            1
+        )
+        
+        computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerGroup)
+        
+        computeEncoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        let totalPixels = Float(width * height)
+        let sumLum = atomicSumPointer.pointee.sumLum
+        let sumLumSquared = atomicSumPointer.pointee.sumLumSquared
+        
+        let meanLum = sumLum / totalPixels
+        let meanLumSquared = sumLumSquared / totalPixels
+        
+        let variance = meanLumSquared - (meanLum * meanLum)
+        
+//        let formattedVariance = String(format: "%.4f", variance)
+//        print("Luminance Variance: \(formattedVariance)")
+        return variance
+    }
+ 
+    func computeLuminanceVarianceCPU(texture: MTLTexture) -> Float {
+        // 1. Get texture size
+        let width = texture.width
+        let height = texture.height
+        let pixelCount = width * height
+
+        // 2. Prepare buffer to receive texture data
+        let bytesPerPixel = 4 * MemoryLayout<UInt8>.size // 4 components, 8 bits each
+        let bytesPerRow = bytesPerPixel * width
+        let dataSize = bytesPerRow * height
+        var pixelData = [UInt8](repeating: 0, count: dataSize)
+
+        // 3. Create region to copy
+        let region = MTLRegionMake2D(0, 0, width, height)
+
+        // 4. Copy texture data to CPU-accessible buffer
+        texture.getBytes(&pixelData, bytesPerRow: bytesPerRow, from: region, mipmapLevel: 0)
+
+        // 5. Compute luminance values and accumulate sums
+        var sumLum: Float = 0.0
+        var sumLumSquared: Float = 0.0
+
+        for i in stride(from: 0, to: pixelData.count, by: 4) {
+            // Ensure indices are within bounds
+            guard i + 3 < pixelData.count else {
+                print("Index out of bounds at position \(i)")
+                break
+            }
+
+            // Read pixel components based on pixel format
+            let r, g, b: Float
+
+            if texture.pixelFormat == .bgra8Unorm {
+                b = Float(pixelData[i]) / 255.0
+                g = Float(pixelData[i + 1]) / 255.0
+                r = Float(pixelData[i + 2]) / 255.0
+                // Alpha channel is pixelData[i + 3] if needed
+            } else if texture.pixelFormat == .rgba8Unorm {
+                r = Float(pixelData[i]) / 255.0
+                g = Float(pixelData[i + 1]) / 255.0
+                b = Float(pixelData[i + 2]) / 255.0
+                // Alpha channel is pixelData[i + 3] if needed
+            } else {
+                print("Unsupported pixel format")
+                return 0.0
+            }
+
+            // Compute luminance
+            let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+            sumLum += luminance
+            sumLumSquared += luminance * luminance
+        }
+
+        let totalPixels = Float(pixelCount)
+        if totalPixels > 0 {
+            let meanLum = sumLum / totalPixels
+            let meanLumSquared = sumLumSquared / totalPixels
+
+            let variance = meanLumSquared - (meanLum * meanLum)
+            return variance
+        } else {
+            print("Error: totalPixels is zero")
+            return 0.0
+        }
+    }
+
     func render(streams: [SyphonStream],
                 in view: MTKView,
                 renderCommandBuffer: MTLCommandBuffer,
@@ -145,8 +270,11 @@ class SyphonRenderer {
         if !textures.isEmpty {
             for i in 0..<textures.count {
                 let tex = textures[i]["tex"] as! MTLTexture
-                let lum = calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
+//                let lum = calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
+                let lum = calculateLuminanceVariance(texture: tex, commandBuffer: computeCommandBuffer)
                 textures[i]["lum"] = lum
+                let lumCpu = computeLuminanceVarianceCPU(texture: tex)
+                textures[i]["lumCpu"] = lumCpu
             }
         }
         
@@ -163,9 +291,10 @@ class SyphonRenderer {
                 let tex = texture["tex"] as! MTLTexture
                 var alpha = texture["alpha"] as! Float
                 let lum = texture["lum"] as! Float
-                
+                let lum2 = texture["lumCpu"] as! Float
+
                 if frameCount % logFreq == 0 {
-                    print("\(ObjectIdentifier(tex)) alpha: \(alpha) lum: \(lum)")
+                    print("\(ObjectIdentifier(tex)) alpha: \(alpha) lum: \(lum) lumCpu: \(lum2)")
                 }
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
