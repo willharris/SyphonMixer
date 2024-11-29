@@ -39,8 +39,18 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     return float4(color.rgb, color.a * alpha);
 }
 
+// Compute shader function
+struct LuminanceData {
+    float luminance;
+    float variance;
+    float sumLum;
+    float sumLumSquared;
+    uint width;
+    uint height;
+};
+
 kernel void compute_luminance(texture2d<float, access::sample> inputTexture [[ texture(0) ]],
-                              device float *output [[ buffer(0) ]],
+                              device LuminanceData &luminanceData [[ buffer(0) ]],
                               uint2 gid [[ thread_position_in_grid ]],
                               uint2 textureSize [[ threads_per_grid ]]) {
     // Normalize the gid based on the texture size
@@ -54,25 +64,17 @@ kernel void compute_luminance(texture2d<float, access::sample> inputTexture [[ t
 
     // Example: Write one luminance value (for gid 0,0 only, as a placeholder)
     if (gid.x == 0 && gid.y == 0) {
-        *output = luminance; // Write the computed luminance
+        luminanceData.luminance = luminance; // Write the computed luminance
     }
 }
 
-// Structure to hold the atomic accumulators
-struct AtomicSum {
-    atomic<float> sumLum;
-    atomic<float> sumLumSquared;
-};
-
 // Compute shader function
 kernel void compute_luminance_variance(
-    texture2d<float, access::read>  inTexture        [[texture(0)]],
-    device AtomicSum&               atomicSum        [[buffer(0)]],
-    constant uint&                  width            [[buffer(1)]],
-    constant uint&                  height           [[buffer(2)]],
-    uint3                           tid              [[thread_position_in_grid]],
-    uint3                           tpt              [[thread_position_in_threadgroup]],
-    uint3                           tpg              [[threads_per_threadgroup]]
+    texture2d<float, access::read> inTexture [[texture(0)]],
+    device LuminanceData &luminanceData [[buffer(0)]],
+    uint3 tid [[thread_position_in_grid]],
+    uint3 tpt [[thread_position_in_threadgroup]],
+    uint3 tpg [[threads_per_threadgroup]]
 ) {
     // Compute scalar thread index within the threadgroup
     uint threadIndex = tpt.z * (tpg.x * tpg.y) + tpt.y * tpg.x + tpt.x;
@@ -92,7 +94,7 @@ kernel void compute_luminance_variance(
     float localSumLumSquared = 0.0;
 
     // Check if the thread is within texture bounds
-    if (tid.x < width && tid.y < height) {
+    if (tid.x < luminanceData.width && tid.y < luminanceData.height) {
         // Read the pixel color
         float4 color = inTexture.read(uint2(tid.x, tid.y));
 
@@ -124,7 +126,7 @@ kernel void compute_luminance_variance(
 
     // First thread in the threadgroup writes the partial sums to atomic accumulators
     if (threadIndex == 0) {
-        atomic_fetch_add_explicit(&atomicSum.sumLum, partialSumLum[0], memory_order_relaxed);
-        atomic_fetch_add_explicit(&atomicSum.sumLumSquared, partialSumLumSquared[0], memory_order_relaxed);
+        luminanceData.sumLum = partialSumLum[0];
+        luminanceData.sumLumSquared = partialSumLumSquared[0];
     }
 }

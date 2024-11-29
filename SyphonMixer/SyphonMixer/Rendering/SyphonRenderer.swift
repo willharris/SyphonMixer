@@ -11,17 +11,12 @@ import Syphon
 import MetalKit
 
 struct LuminanceData {
-    var totalLuminance: Float = 0.0
-    var pixelCount: UInt32 = 0
-    var debugMaxLuminance: Float = 0.0
-    var debugMinLuminance: Float = 0.0
-    var debugWidth: UInt32 = 0
-    var debugHeight: UInt32 = 0
-}
-
-struct AtomicSum {
-    var sumLum: Float
-    var sumLumSquared: Float
+    var luminance: Float = -1.0
+    var variance: Float = -1.0
+    var sumLum: Float = -1.0
+    var sumLumSquared: Float = -1.0
+    var width: UInt32 = 0
+    var height: UInt32 = 0
 }
 
 class SyphonRenderer {
@@ -57,9 +52,9 @@ class SyphonRenderer {
             0, 2, 3
         ]
         
-        var luminance: Float = 0.0
-        luminanceBuffer = device.makeBuffer(bytes: &luminance,
-                                            length: MemoryLayout<Float>.size,
+        var luminanceData = LuminanceData()
+        luminanceBuffer = device.makeBuffer(bytes: &luminanceData,
+                                            length: MemoryLayout<LuminanceData>.size,
                                             options: .storageModeShared)!
         
        vertexBuffer = device.makeBuffer(bytes: vertices,
@@ -106,7 +101,7 @@ class SyphonRenderer {
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
     
-    private func calculateLuminance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> Float {
+    private func calculateLuminance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
         let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
         
         computeEncoder.setComputePipelineState(luminancePipelineState)
@@ -126,35 +121,23 @@ class SyphonRenderer {
         computeEncoder.dispatchThreadgroups(threadGroups, threadsPerThreadgroup: threadGroupSize)
         
         computeEncoder.endEncoding()
-        
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-
-        let luminancePointer = luminanceBuffer.contents().bindMemory(to: Float.self, capacity: 1)
-        let luminance = luminancePointer.pointee
-        return luminance
-    }
+   }
     
-    private func calculateLuminanceVariance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) -> Float {
-        let atomicSumSize = MemoryLayout<AtomicSum>.stride
-        let atomicSumBuffer = device.makeBuffer(length: atomicSumSize, options: .storageModeShared)!
-        
-        let atomicSumPointer = atomicSumBuffer.contents().bindMemory(to: AtomicSum.self, capacity: 1)
-        atomicSumPointer.pointee.sumLum = 0.0
-        atomicSumPointer.pointee.sumLumSquared = 0.0
-        
+    private func calculateLuminanceVariance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
         var width: UInt32 = UInt32(texture.width)
         var height: UInt32 = UInt32(texture.height)
-        let widthBuffer = device.makeBuffer(bytes: &width, length: MemoryLayout<UInt32>.size, options: [])
-        let heightBuffer = device.makeBuffer(bytes: &height, length: MemoryLayout<UInt32>.size, options: [])
+        let luminancePointer = luminanceBuffer.contents().bindMemory(
+            to: LuminanceData.self,
+            capacity: 1
+        )
+        luminancePointer.pointee.width = width
+        luminancePointer.pointee.height = height
         
         let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
         
         computeEncoder.setComputePipelineState(luminanceVariancePipelineState)
         computeEncoder.setTexture(texture, index: 0)
-        computeEncoder.setBuffer(atomicSumBuffer, offset: 0, index: 0)
-        computeEncoder.setBuffer(widthBuffer, offset: 0, index: 1)
-        computeEncoder.setBuffer(heightBuffer, offset: 0, index: 2)
+        computeEncoder.setBuffer(luminanceBuffer, offset: 0, index: 0)
         
         let threadGroupWidth = 16
         let threadGroupHeight = 16
@@ -168,22 +151,7 @@ class SyphonRenderer {
         computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerGroup)
         
         computeEncoder.endEncoding()
-        commandBuffer.commit()
-        commandBuffer.waitUntilCompleted()
-        
-        let totalPixels = Float(width * height)
-        let sumLum = atomicSumPointer.pointee.sumLum
-        let sumLumSquared = atomicSumPointer.pointee.sumLumSquared
-        
-        let meanLum = sumLum / totalPixels
-        let meanLumSquared = sumLumSquared / totalPixels
-        
-        let variance = meanLumSquared - (meanLum * meanLum)
-        
-//        let formattedVariance = String(format: "%.4f", variance)
-//        print("Luminance Variance: \(formattedVariance)")
-        return variance
-    }
+   }
  
     func computeLuminanceVarianceCPU(texture: MTLTexture) -> Float {
         // 1. Get texture size
@@ -270,11 +238,31 @@ class SyphonRenderer {
         if !textures.isEmpty {
             for i in 0..<textures.count {
                 let tex = textures[i]["tex"] as! MTLTexture
-//                let lum = calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
-                let lum = calculateLuminanceVariance(texture: tex, commandBuffer: computeCommandBuffer)
-                textures[i]["lum"] = lum
-                let lumCpu = computeLuminanceVarianceCPU(texture: tex)
-                textures[i]["lumCpu"] = lumCpu
+                calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
+                calculateLuminanceVariance(texture: tex, commandBuffer: computeCommandBuffer)
+                
+                computeCommandBuffer.commit()
+                computeCommandBuffer.waitUntilCompleted()
+        
+                // Get luminance value from buffer
+                let luminancePointer = luminanceBuffer.contents().bindMemory(
+                    to: LuminanceData.self,
+                    capacity: 1
+                )
+                let luminance = luminancePointer.pointee.luminance
+        
+                // Calculate variance
+                let totalPixels = Float(luminancePointer.pointee.width * luminancePointer.pointee.height)
+                let sumLum = luminancePointer.pointee.sumLum
+                let sumLumSquared = luminancePointer.pointee.sumLumSquared
+        
+                let meanLum = sumLum / totalPixels
+                let meanLumSquared = sumLumSquared / totalPixels
+        
+                let variance = meanLumSquared - (meanLum * meanLum)
+                
+                textures[i]["lum"] = luminance
+                textures[i]["var"] = variance
             }
         }
         
@@ -290,11 +278,11 @@ class SyphonRenderer {
             for texture in textures {
                 let tex = texture["tex"] as! MTLTexture
                 var alpha = texture["alpha"] as! Float
-                let lum = texture["lum"] as! Float
-                let lum2 = texture["lumCpu"] as! Float
+                let luminance = texture["lum"] as! Float
+                let variance = texture["var"] as! Float
 
                 if frameCount % logFreq == 0 {
-                    print("\(ObjectIdentifier(tex)) alpha: \(alpha) lum: \(lum) lumCpu: \(lum2)")
+                    print("\(ObjectIdentifier(tex)) alpha: \(alpha) lum: \(String(format:"%.4f", luminance)) var: \(String(format:"%.4f", variance))")
                 }
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
