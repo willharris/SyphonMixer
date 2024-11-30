@@ -62,17 +62,18 @@ class SyphonRenderer {
     private var currentColor = float4(1.0, 0.0, 0.0, 1.0)
     private var hue: Float = 0.0
 
-    // Statistical tracking
-     private let ROLLING_WINDOW = 60
-     private var frameStats: [ObjectIdentifier: [FrameStats]] = [:]
-     private let statsQueue = DispatchQueue(label: "com.syphonmixer.stats")
-     private var frameIndices: [ObjectIdentifier: Int] = [:]  // Track frame count per texture
+    // Statistical tracking with thread safety
+    private let ROLLING_WINDOW = 60
+    private var frameStats: [ObjectIdentifier: [FrameStats]] = [:]
+    private let statsQueue = DispatchQueue(label: "com.syphonmixer.stats")
+    private var frameIndices: [ObjectIdentifier: Int] = [:]
 
     // Fade detection parameters
     private let FADE_THRESHOLD: Float = 0.003
     private let FADE_CONSISTENCY_THRESHOLD: Float = 0.7
     private let MIN_FADE_FRAMES = 15
-    
+    private let fadeStateQueue = DispatchQueue(label: "com.syphonmixer.fadestate")
+
     // Track previous fade state per texture
     private var lastFadeState: [ObjectIdentifier: FadeAnalysis] = [:]
 
@@ -97,13 +98,13 @@ class SyphonRenderer {
                                             length: MemoryLayout<LuminanceData>.size,
                                             options: .storageModeShared)!
         
-       vertexBuffer = device.makeBuffer(bytes: vertices,
-                                       length: vertices.count * MemoryLayout<Float>.stride,
-                                       options: [])!
+        vertexBuffer = device.makeBuffer(bytes: vertices,
+                                         length: vertices.count * MemoryLayout<Float>.stride,
+                                         options: [])!
         
         indexBuffer = device.makeBuffer(bytes: indices,
-                                      length: indices.count * MemoryLayout<UInt16>.stride,
-                                      options: [])!
+                                        length: indices.count * MemoryLayout<UInt16>.stride,
+                                        options: [])!
         
         // Create shader library and pipeline states
         self.library = device.makeDefaultLibrary()!
@@ -141,8 +142,45 @@ class SyphonRenderer {
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
     
+    // Thread-safe accessors for state
+    private func getFrameStats(for textureId: ObjectIdentifier) -> [FrameStats]? {
+        var result: [FrameStats]?
+        statsQueue.sync {
+            result = frameStats[textureId]
+        }
+        return result
+    }
+
+    private func getCurrentFrameIndex(for textureId: ObjectIdentifier) -> Int {
+        var result: Int = 0
+        statsQueue.sync {
+            result = frameIndices[textureId] ?? 0
+        }
+        return result
+    }
+
+    private func updateLastFadeState(_ analysis: FadeAnalysis, for textureId: ObjectIdentifier) {
+        fadeStateQueue.async {
+            self.lastFadeState[textureId] = analysis
+        }
+    }
+
+    private func getLastFadeState(for textureId: ObjectIdentifier) -> FadeAnalysis? {
+        var result: FadeAnalysis?
+        fadeStateQueue.sync {
+            result = lastFadeState[textureId]
+        }
+        return result
+    }
+    
     private func analyzeFade(for textureId: ObjectIdentifier) -> FadeAnalysis {
-        guard let stats = frameStats[textureId],
+        // Create a local copy of stats on the stats queue
+        var localStats: [FrameStats]?
+        statsQueue.sync {
+            localStats = frameStats[textureId]
+        }
+        
+        guard let stats = localStats,
               stats.count >= MIN_FADE_FRAMES else {
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
         }
@@ -181,7 +219,7 @@ class SyphonRenderer {
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
     }
     
-     private func calculateLuminanceVariance(
+    private func calculateLuminanceVariance(
         texture: MTLTexture,
         commandBuffer: MTLCommandBuffer
     ) {
@@ -208,16 +246,15 @@ class SyphonRenderer {
             1
         )
         let numThreadgroups = MTLSizeMake(
-            (texture.width  + threadGroupWidth  - 1) / threadGroupWidth,
+            (texture.width + threadGroupWidth - 1) / threadGroupWidth,
             (texture.height + threadGroupHeight - 1) / threadGroupHeight,
             1
         )
         
-        computeEncoder
-            .dispatchThreadgroups(
-                numThreadgroups,
-                threadsPerThreadgroup: threadsPerGroup
-            )
+        computeEncoder.dispatchThreadgroups(
+            numThreadgroups,
+            threadsPerThreadgroup: threadsPerGroup
+        )
         
         computeEncoder.endEncoding()
     }
@@ -268,7 +305,12 @@ class SyphonRenderer {
     }
     
     private func getStatsForTexture(_ textureId: ObjectIdentifier) -> (luminanceSlope: Float, varianceSlope: Float)? {
-        guard let stats = frameStats[textureId],
+        var localStats: [FrameStats]?
+        statsQueue.sync {
+            localStats = frameStats[textureId]
+        }
+        
+        guard let stats = localStats,
               stats.count >= 2 else {
             return nil
         }
@@ -374,8 +416,10 @@ class SyphonRenderer {
 
                 // Check for fade state changes
                 let fadeAnalysis = analyzeFade(for: textureId)
-                if let lastAnalysis = lastFadeState[textureId] {
-                    // Log only when fade state changes
+                                
+                // Fade state update and logging
+                // Log only when fade state changes
+                if let lastAnalysis = getLastFadeState(for: textureId) {
                     if fadeAnalysis.type != lastAnalysis.type {
                         logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
                     }
@@ -383,7 +427,7 @@ class SyphonRenderer {
                     // Log initial fade detection
                     logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
                 }
-                lastFadeState[textureId] = fadeAnalysis
+                updateLastFadeState(fadeAnalysis, for: textureId)
 
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
