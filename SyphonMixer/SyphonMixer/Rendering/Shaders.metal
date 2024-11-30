@@ -43,8 +43,8 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
 struct LuminanceData {
     float luminance;
     float variance;
-    float sumLum;
-    float sumLumSquared;
+    atomic<float> sumLum;
+    atomic<float> sumLumSquared;
     uint width;
     uint height;
 };
@@ -126,7 +126,7 @@ kernel void compute_luminance_variance(
 
     // First thread in the threadgroup writes the partial sums to atomic accumulators
     if (threadIndex == 0) {
-        luminanceData.sumLum = partialSumLum[0];
-        luminanceData.sumLumSquared = partialSumLumSquared[0];
+        atomic_fetch_add_explicit(&luminanceData.sumLum, partialSumLum[0], memory_order_relaxed);
+        atomic_fetch_add_explicit(&luminanceData.sumLumSquared, partialSumLumSquared[0], memory_order_relaxed);
     }
 }
