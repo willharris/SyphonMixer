@@ -222,9 +222,8 @@ class SyphonRenderer {
 
     func render(streams: [SyphonStream],
                 in view: MTKView,
-                renderCommandBuffer: MTLCommandBuffer,
-                renderPassDescriptor: MTLRenderPassDescriptor,
-                computeCommandBuffer: MTLCommandBuffer)
+                commandQueue: MTLCommandQueue,
+                renderPassDescriptor: MTLRenderPassDescriptor) -> MTLCommandBuffer
     {
         var textures = streams.compactMap { stream -> [String: Any]? in
             guard let client = stream.client,
@@ -238,18 +237,27 @@ class SyphonRenderer {
         if !textures.isEmpty {
             for i in 0..<textures.count {
                 let tex = textures[i]["tex"] as! MTLTexture
-                calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
-                calculateLuminanceVariance(texture: tex, commandBuffer: computeCommandBuffer)
                 
-                computeCommandBuffer.commit()
-                computeCommandBuffer.waitUntilCompleted()
-        
                 // Get luminance value from buffer
                 let luminancePointer = luminanceBuffer.contents().bindMemory(
                     to: LuminanceData.self,
                     capacity: 1
                 )
-                let luminance = luminancePointer.pointee.luminance
+
+                luminancePointer.pointee.luminance = 0.0
+                luminancePointer.pointee.variance = 0.0
+                luminancePointer.pointee.sumLum = 0.0
+                luminancePointer.pointee.sumLumSquared = 0.0
+                luminancePointer.pointee.width = UInt32(tex.width)
+                luminancePointer.pointee.height = UInt32(tex.height)
+                
+                let computeCommandBuffer = commandQueue.makeCommandBuffer()!
+                
+                calculateLuminance(texture: tex, commandBuffer: computeCommandBuffer)
+                calculateLuminanceVariance(texture: tex, commandBuffer: computeCommandBuffer)
+                
+                computeCommandBuffer.commit()
+                computeCommandBuffer.waitUntilCompleted()
         
                 // Calculate variance
                 let totalPixels = Float(luminancePointer.pointee.width * luminancePointer.pointee.height)
@@ -261,10 +269,12 @@ class SyphonRenderer {
         
                 let variance = meanLumSquared - (meanLum * meanLum)
                 
-                textures[i]["lum"] = luminance
+                textures[i]["lum"] = luminancePointer.pointee.luminance
                 textures[i]["var"] = variance
             }
         }
+        
+        let renderCommandBuffer = commandQueue.makeCommandBuffer()!
         
         // Render textures
         let renderEncoder = renderCommandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
@@ -291,6 +301,8 @@ class SyphonRenderer {
         frameCount += 1
 
         renderEncoder.endEncoding()
+        
+        return renderCommandBuffer
     }
     
     // Create a test render method

@@ -56,18 +56,15 @@ struct MetalView: NSViewRepresentable {
         
         func draw(in view: MTKView) {
             guard let drawable = view.currentDrawable,
-                  let renderCommandBuffer = parent.commandQueue.makeCommandBuffer(),
-                  let computeCommandBuffer = parent.commandQueue.makeCommandBuffer(),
                   let renderPassDescriptor = view.currentRenderPassDescriptor else {
                 return
             }
+            let commandQueue = parent.commandQueue
             
-            parent.renderer.render(streams: streams,
+            let renderCommandBuffer = parent.renderer.render(streams: streams,
                                    in: view,
-                                   renderCommandBuffer: renderCommandBuffer,
-                                   renderPassDescriptor: renderPassDescriptor,
-                                   computeCommandBuffer: computeCommandBuffer)
-            
+                                   commandQueue: commandQueue,
+                                   renderPassDescriptor: renderPassDescriptor)
             renderCommandBuffer.present(drawable)
             renderCommandBuffer.commit()
         }
