@@ -19,6 +19,12 @@ struct LuminanceData {
     var height: UInt32 = 0
 }
 
+struct FrameStats {
+    let luminance: Float
+    let variance: Float
+    let frameIndex: Int
+}
+
 class SyphonRenderer {
     let logger = Logger()
     let device: MTLDevice
@@ -35,6 +41,12 @@ class SyphonRenderer {
     private var frameCount = 0
     private var currentColor = float4(1.0, 0.0, 0.0, 1.0)
     private var hue: Float = 0.0
+
+    // Statistical tracking
+     private let ROLLING_WINDOW = 60
+     private var frameStats: [ObjectIdentifier: [FrameStats]] = [:]
+     private let statsQueue = DispatchQueue(label: "com.syphonmixer.stats")
+     private var frameIndices: [ObjectIdentifier: Int] = [:]  // Track frame count per texture
 
     init(device: MTLDevice) {
         self.device = device
@@ -101,7 +113,10 @@ class SyphonRenderer {
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
     
-   private func calculateLuminanceVariance(texture: MTLTexture, commandBuffer: MTLCommandBuffer) {
+    private func calculateLuminanceVariance(
+        texture: MTLTexture,
+        commandBuffer: MTLCommandBuffer
+    ) {
         var width: UInt32 = UInt32(texture.width)
         var height: UInt32 = UInt32(texture.height)
         let luminancePointer = luminanceBuffer.contents().bindMemory(
@@ -119,18 +134,86 @@ class SyphonRenderer {
         
         let threadGroupWidth = 16
         let threadGroupHeight = 16
-        let threadsPerGroup = MTLSizeMake(threadGroupWidth, threadGroupHeight, 1)
+        let threadsPerGroup = MTLSizeMake(
+            threadGroupWidth,
+            threadGroupHeight,
+            1
+        )
         let numThreadgroups = MTLSizeMake(
             (texture.width  + threadGroupWidth  - 1) / threadGroupWidth,
             (texture.height + threadGroupHeight - 1) / threadGroupHeight,
             1
         )
         
-        computeEncoder.dispatchThreadgroups(numThreadgroups, threadsPerThreadgroup: threadsPerGroup)
+        computeEncoder
+            .dispatchThreadgroups(
+                numThreadgroups,
+                threadsPerThreadgroup: threadsPerGroup
+            )
         
         computeEncoder.endEncoding()
-   }
+    }
  
+    private func calculateSlope(for values: [Float]) -> Float {
+        guard values.count >= 2 else { return 0.0 }
+        
+        let n = Float(values.count)
+        // X values are just frame indices: [0, 1, 2, ..., n-1]
+        let sumX = (n - 1.0) * n / 2.0  // Sum of arithmetic sequence
+        let sumXX = (n - 1.0) * n * (2.0 * n - 1.0) / 6.0  // Sum of squares
+        
+        let sumY = values.reduce(0.0, +)
+        let sumXY = zip(0..<values.count, values).map { Float($0) * $1 }.reduce(0.0, +)
+        
+        let denominator = n * sumXX - sumX * sumX
+        if denominator.isZero { return 0.0 }
+        
+        return (n * sumXY - sumX * sumY) / denominator
+    }
+
+    private func updateStats(textureId: ObjectIdentifier, luminance: Float, variance: Float) {
+        statsQueue.async {
+            // Increment or initialize frame index for this texture
+            if self.frameIndices[textureId] == nil {
+                self.frameIndices[textureId] = 0
+            }
+            
+            let currentIndex = self.frameIndices[textureId]!
+            self.frameIndices[textureId] = currentIndex + 1
+            
+            let newStats = FrameStats(luminance: luminance,
+                                    variance: variance,
+                                    frameIndex: currentIndex)
+            
+            if self.frameStats[textureId] == nil {
+                self.frameStats[textureId] = []
+            }
+            
+            self.frameStats[textureId]?.append(newStats)
+            
+            // Keep only the last ROLLING_WINDOW frames
+            if let count = self.frameStats[textureId]?.count,
+               count > self.ROLLING_WINDOW {
+                self.frameStats[textureId]?.removeFirst(count - self.ROLLING_WINDOW)
+            }
+        }
+    }
+    
+    private func getStatsForTexture(_ textureId: ObjectIdentifier) -> (luminanceSlope: Float, varianceSlope: Float)? {
+        guard let stats = frameStats[textureId],
+              stats.count >= 2 else {
+            return nil
+        }
+        
+        let luminances = stats.map { $0.luminance }
+        let variances = stats.map { $0.variance }
+        
+        let lumSlope = calculateSlope(for: luminances)
+        let varSlope = calculateSlope(for: variances)
+        
+        return (lumSlope, varSlope)
+    }
+    
     func render(streams: [SyphonStream],
                 in view: MTKView,
                 commandQueue: MTLCommandQueue,
@@ -181,8 +264,13 @@ class SyphonRenderer {
                 
                 let luminance = sumLum / totalPixels
                 
+                // Update rolling statistics
+                let textureId = ObjectIdentifier(tex)
+                updateStats(textureId: textureId, luminance: luminance, variance: variance)
+
                 textures[i]["lum"] = luminance
                 textures[i]["var"] = variance
+                textures[i]["id"] = textureId
             }
         }
         
@@ -202,9 +290,29 @@ class SyphonRenderer {
                 var alpha = texture["alpha"] as! Float
                 let luminance = texture["lum"] as! Float
                 let variance = texture["var"] as! Float
+                let textureId = texture["id"] as! ObjectIdentifier
 
                 if frameCount % logFreq == 0 {
-                    print("\(ObjectIdentifier(tex)) alpha: \(alpha) lum: \(String(format:"%.8f", luminance)) var: \(String(format:"%.8f", variance))")
+                    if let slopes = getStatsForTexture(textureId) {
+                        // Calculate relative changes over the window period
+                        let lumPercentChange = slopes.luminanceSlope * Float(ROLLING_WINDOW) * 100
+                        let varPercentChange = slopes.varianceSlope * Float(ROLLING_WINDOW) * 100
+                        
+                        print("""
+                            \(textureId)
+                            Brightness: \(String(format:"%.1f%%", luminance * 100)) (\(String(format:"%+.1f%%", lumPercentChange)) over window)
+                            Variance: \(String(format:"%.6f", variance)) (\(String(format:"%+.2f%%", varPercentChange)) over window)
+                            Alpha: \(String(format:"%.2f", alpha))
+                            """)
+                    } else {
+                        print("""
+                            \(textureId)
+                            Brightness: \(String(format:"%.1f%%", luminance * 100))
+                            Variance: \(String(format:"%.6f", variance))
+                            Alpha: \(String(format:"%.2f", alpha))
+                            (Insufficient data for trend analysis)
+                            """)
+                    }
                 }
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
