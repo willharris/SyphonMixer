@@ -10,4 +10,7 @@
    <FileRef
       location = "group:Syphon-Framework/Syphon.xcodeproj">
    </FileRef>
+   <FileRef
+      location = "group:luminance.py">
+   </FileRef>
 </Workspace>
