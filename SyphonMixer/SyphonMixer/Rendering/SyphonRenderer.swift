@@ -25,6 +25,26 @@ struct FrameStats {
     let frameIndex: Int
 }
 
+struct FadeAnalysis {
+    enum FadeType {
+        case none
+        case fadeIn
+        case fadeOut
+        
+        var description: String {
+            switch self {
+            case .none: return "No fade"
+            case .fadeIn: return "Fade in"
+            case .fadeOut: return "Fade out"
+            }
+        }
+    }
+    
+    let type: FadeType
+    let confidence: Float  // 0-1 indicating how confident we are this is a fade
+    let averageRate: Float  // Average rate of change per frame
+}
+
 class SyphonRenderer {
     let logger = Logger()
     let device: MTLDevice
@@ -47,6 +67,14 @@ class SyphonRenderer {
      private var frameStats: [ObjectIdentifier: [FrameStats]] = [:]
      private let statsQueue = DispatchQueue(label: "com.syphonmixer.stats")
      private var frameIndices: [ObjectIdentifier: Int] = [:]  // Track frame count per texture
+
+    // Fade detection parameters
+    private let FADE_THRESHOLD: Float = 0.003
+    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.7
+    private let MIN_FADE_FRAMES = 15
+    
+    // Track previous fade state per texture
+    private var lastFadeState: [ObjectIdentifier: FadeAnalysis] = [:]
 
     init(device: MTLDevice) {
         self.device = device
@@ -113,7 +141,47 @@ class SyphonRenderer {
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
     }
     
-    private func calculateLuminanceVariance(
+    private func analyzeFade(for textureId: ObjectIdentifier) -> FadeAnalysis {
+        guard let stats = frameStats[textureId],
+              stats.count >= MIN_FADE_FRAMES else {
+            return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
+        }
+        
+        let luminances = stats.map { $0.luminance }
+        
+        // Calculate frame-to-frame changes
+        var changes: [Float] = []
+        for i in 1..<luminances.count {
+            changes.append(luminances[i] - luminances[i-1])
+        }
+        
+        // Analyze the consistency of changes
+        let avgChange = changes.reduce(0, +) / Float(changes.count)
+        let consistentChanges = changes.filter { change in
+            // Check if change is in same direction as average and significant
+            return abs(change) >= FADE_THRESHOLD &&
+                   ((avgChange > 0 && change > 0) || (avgChange < 0 && change < 0))
+        }
+        
+        let consistency = Float(consistentChanges.count) / Float(changes.count)
+        
+        // Determine if we have a fade
+        if abs(avgChange) >= FADE_THRESHOLD && consistency >= FADE_CONSISTENCY_THRESHOLD {
+            let fadeType: FadeAnalysis.FadeType = avgChange > 0 ? .fadeIn : .fadeOut
+            
+            // Calculate confidence based on consistency and magnitude of change
+            let magnitudeConfidence = min(abs(avgChange) / (FADE_THRESHOLD * 2), 1.0)
+            let confidence = (consistency + magnitudeConfidence) / 2.0
+            
+            return FadeAnalysis(type: fadeType,
+                              confidence: confidence,
+                              averageRate: abs(avgChange))
+        }
+        
+        return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
+    }
+    
+     private func calculateLuminanceVariance(
         texture: MTLTexture,
         commandBuffer: MTLCommandBuffer
     ) {
@@ -214,6 +282,18 @@ class SyphonRenderer {
         return (lumSlope, varSlope)
     }
     
+    private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float) {
+        if fadeAnalysis.type != .none {
+            print("""
+                \(textureId)
+                🎬 \(fadeAnalysis.type.description) detected
+                Current brightness: \(String(format:"%.1f%%", luminance * 100))
+                Confidence: \(String(format:"%.1f%%", fadeAnalysis.confidence * 100))
+                Rate: \(String(format:"%.2f%%", fadeAnalysis.averageRate * 100))/frame
+                """)
+        }
+    }
+
     func render(streams: [SyphonStream],
                 in view: MTKView,
                 commandQueue: MTLCommandQueue,
@@ -292,28 +372,19 @@ class SyphonRenderer {
                 let variance = texture["var"] as! Float
                 let textureId = texture["id"] as! ObjectIdentifier
 
-                if frameCount % logFreq == 0 {
-                    if let slopes = getStatsForTexture(textureId) {
-                        // Calculate relative changes over the window period
-                        let lumPercentChange = slopes.luminanceSlope * Float(ROLLING_WINDOW) * 100
-                        let varPercentChange = slopes.varianceSlope * Float(ROLLING_WINDOW) * 100
-                        
-                        print("""
-                            \(textureId)
-                            Brightness: \(String(format:"%.1f%%", luminance * 100)) (\(String(format:"%+.1f%%", lumPercentChange)) over window)
-                            Variance: \(String(format:"%.6f", variance)) (\(String(format:"%+.2f%%", varPercentChange)) over window)
-                            Alpha: \(String(format:"%.2f", alpha))
-                            """)
-                    } else {
-                        print("""
-                            \(textureId)
-                            Brightness: \(String(format:"%.1f%%", luminance * 100))
-                            Variance: \(String(format:"%.6f", variance))
-                            Alpha: \(String(format:"%.2f", alpha))
-                            (Insufficient data for trend analysis)
-                            """)
+                // Check for fade state changes
+                let fadeAnalysis = analyzeFade(for: textureId)
+                if let lastAnalysis = lastFadeState[textureId] {
+                    // Log only when fade state changes
+                    if fadeAnalysis.type != lastAnalysis.type {
+                        logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
                     }
+                } else if fadeAnalysis.type != .none {
+                    // Log initial fade detection
+                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
                 }
+                lastFadeState[textureId] = fadeAnalysis
+
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
             }
