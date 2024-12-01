@@ -22,6 +22,7 @@ struct LuminanceData {
 struct FrameStats {
     let luminance: Float
     let variance: Float
+    let edgeDensity: Float
     let frameIndex: Int
 }
 
@@ -34,8 +35,8 @@ struct FadeAnalysis {
         var description: String {
             switch self {
             case .none: return "No fade"
-            case .fadeIn: return "Fade in"
-            case .fadeOut: return "Fade out"
+            case .fadeIn: return "Fade IN"
+            case .fadeOut: return "Fade OUT"
             }
         }
     }
@@ -69,8 +70,8 @@ class SyphonRenderer {
     private var frameIndices: [ObjectIdentifier: Int] = [:]
 
     // Fade detection parameters
-    private let FADE_THRESHOLD: Float = 0.001      // Detect 0.1% changes per frame
-    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.45
+    private let FADE_THRESHOLD: Float = 0.0008      // Detect 0.1% changes per frame
+    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.40
     private let MIN_FADE_FRAMES = 30  // Minimum number of frames to analyze
     private let fadeStateQueue = DispatchQueue(label: "com.syphonmixer.fadestate")
 
@@ -282,7 +283,7 @@ class SyphonRenderer {
         return (n * sumXY - sumX * sumY) / denominator
     }
 
-    private func updateStats(textureId: ObjectIdentifier, luminance: Float, variance: Float) {
+    private func updateStats(textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
         statsQueue.async {
             // Increment or initialize frame index for this texture
             if self.frameIndices[textureId] == nil {
@@ -294,6 +295,7 @@ class SyphonRenderer {
             
             let newStats = FrameStats(luminance: luminance,
                                     variance: variance,
+                                    edgeDensity: edgeDensity,
                                     frameIndex: currentIndex)
             
             if self.frameStats[textureId] == nil {
@@ -330,16 +332,10 @@ class SyphonRenderer {
         return (lumSlope, varSlope)
     }
     
-    private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float) {
-        if fadeAnalysis.type != .none {
-            print("""
-                \(textureId)
-                🎬 \(fadeAnalysis.type.description) detected
-                Current brightness: \(String(format:"%.1f%%", luminance * 100))
-                Confidence: \(String(format:"%.1f%%", fadeAnalysis.confidence * 100))
-                Rate: \(String(format:"%.2f%%", fadeAnalysis.averageRate * 100))/frame
-                """)
-        }
+    private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
+        print("""
+            \(textureId) 🎬 \(fadeAnalysis.type.description) Brightness: \(String(format:"%.1f%%", luminance * 100)) Variance: \(String(format:"%.1f%%", variance * 100)) Edge density: \(String(format:"%.1f%%", edgeDensity)) Confidence: \(String(format:"%.1f%%", fadeAnalysis.confidence * 100)) Rate: \(String(format:"%.2f%%", fadeAnalysis.averageRate * 100))/frame
+        """)
     }
 
     func render(streams: [SyphonStream],
@@ -394,10 +390,12 @@ class SyphonRenderer {
                 
                 // Update rolling statistics
                 let textureId = ObjectIdentifier(tex)
-                updateStats(textureId: textureId, luminance: luminance, variance: variance)
+                let edgeDensity: Float = 0.0
+                updateStats(textureId: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
 
                 textures[i]["lum"] = luminance
                 textures[i]["var"] = variance
+                textures[i]["edge"] = edgeDensity
                 textures[i]["id"] = textureId
             }
         }
@@ -418,20 +416,25 @@ class SyphonRenderer {
                 var alpha = texture["alpha"] as! Float
                 let luminance = texture["lum"] as! Float
                 let variance = texture["var"] as! Float
+                let edgeDensity = texture["edge"] as! Float
                 let textureId = texture["id"] as! ObjectIdentifier
 
                 // Check for fade state changes
                 let fadeAnalysis = analyzeFade(for: textureId)
                                 
-                // Fade state update and logging
-                // Log only when fade state changes
-                if let lastAnalysis = getLastFadeState(for: textureId) {
-                    if fadeAnalysis.type != lastAnalysis.type {
-                        logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
-                    }
-                } else if fadeAnalysis.type != .none {
+//                // Fade state update and logging
+//                // Log only when fade state changes
+//                if let lastAnalysis = getLastFadeState(for: textureId) {
+//                    if fadeAnalysis.type != lastAnalysis.type {
+//                        logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
+//                    }
+//                } else if fadeAnalysis.type != .none {
+//                    // Log initial fade detection
+//                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
+//                }
+                if fadeAnalysis.type != .none {
                     // Log initial fade detection
-                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
+                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
                 }
                 updateLastFadeState(fadeAnalysis, for: textureId)
 
