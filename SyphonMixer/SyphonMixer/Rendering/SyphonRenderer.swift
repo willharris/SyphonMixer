@@ -10,11 +10,14 @@ import Metal
 import Syphon
 import MetalKit
 
-struct LuminanceData {
+struct FrameAnalysisData {
     var luminance: Float = -1.0
     var variance: Float = -1.0
+    var edgeDensity: Float = -1.0
     var sumLum: Float = -1.0
     var sumLumSquared: Float = -1.0
+    var sumEdges: Float = -1.0
+    var maxEdge: UInt32 = 0
     var width: UInt32 = 0
     var height: UInt32 = 0
 }
@@ -53,9 +56,9 @@ class SyphonRenderer {
     let renderPipelineState: MTLRenderPipelineState
     let vertexBuffer: MTLBuffer
     let indexBuffer: MTLBuffer
-    let luminanceBuffer: MTLBuffer
+    let frameAnalysisBuffer: MTLBuffer
     let luminancePipelineState: MTLComputePipelineState
-    let luminanceVariancePipelineState: MTLComputePipelineState
+    let computePipelineState: MTLComputePipelineState
 
     private let debugTestPattern = false
     private let logFreq = 30
@@ -94,10 +97,10 @@ class SyphonRenderer {
             0, 2, 3
         ]
         
-        var luminanceData = LuminanceData()
-        luminanceBuffer = device.makeBuffer(bytes: &luminanceData,
-                                            length: MemoryLayout<LuminanceData>.size,
-                                            options: .storageModeShared)!
+        var frameAnalysisData = FrameAnalysisData()
+        frameAnalysisBuffer = device.makeBuffer(bytes: &frameAnalysisData,
+                                                length: MemoryLayout<FrameAnalysisData>.size,
+                                                options: .storageModeShared)!
         
         vertexBuffer = device.makeBuffer(bytes: vertices,
                                          length: vertices.count * MemoryLayout<Float>.stride,
@@ -114,10 +117,10 @@ class SyphonRenderer {
         let vertexFunction = library.makeFunction(name: "vertex_main")
         let fragmentFunction = library.makeFunction(name: debugTestPattern ? "fragment_main_test" : "fragment_main")
         let luminanceFunction = library.makeFunction(name: "compute_luminance")!
-        let luminanceVarianceFunction = library.makeFunction(name: "compute_luminance_variance")!
+        let analyzeTextureFunction = library.makeFunction(name: "analyze_texture")!
 
         luminancePipelineState = try! device.makeComputePipelineState(function: luminanceFunction)
-        luminanceVariancePipelineState = try! device.makeComputePipelineState(function: luminanceVarianceFunction)
+        computePipelineState = try! device.makeComputePipelineState(function: analyzeTextureFunction)
 
         let pipelineDescriptor = MTLRenderPipelineDescriptor()
         pipelineDescriptor.vertexFunction = vertexFunction
@@ -175,7 +178,6 @@ class SyphonRenderer {
     }
     
     private func analyzeFade(for textureId: ObjectIdentifier) -> FadeAnalysis {
-        // Create a local copy of stats on the stats queue
         var localStats: [FrameStats]?
         statsQueue.sync {
             localStats = frameStats[textureId]
@@ -187,40 +189,79 @@ class SyphonRenderer {
         }
         
         let luminances = stats.map { $0.luminance }
+        let variances = stats.map { $0.variance }
+        let edgeDensities = stats.map { $0.edgeDensity }
+
+        // Calculate total changes
+        let totalLumChange = abs(luminances.last! - luminances.first!)
+        let totalVarChange = abs(variances.last! - variances.first!)
+        
+        // Early exit if total change is too small
+        if totalLumChange < FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5 {
+            return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
+        }
         
         // Calculate frame-to-frame changes
-        var changes: [Float] = []
-        for i in 1..<luminances.count {
-            changes.append(luminances[i] - luminances[i-1])
+        var lumChanges: [Float] = []
+        var varChanges: [Float] = []
+        for i in 1..<stats.count {
+            lumChanges.append(luminances[i] - luminances[i-1])
+            varChanges.append(variances[i] - variances[i-1])
         }
         
-        // Analyze the consistency of changes
-        let avgChange = changes.reduce(0, +) / Float(changes.count)
-        let consistentChanges = changes.filter { change in
-            // Check if change is in same direction as average and significant
-            return abs(change) >= FADE_THRESHOLD &&
-                   ((avgChange > 0 && change > 0) || (avgChange < 0 && change < 0))
+        let avgLumChange = lumChanges.reduce(0, +) / Float(lumChanges.count)
+        let avgVarChange = varChanges.reduce(0, +) / Float(varChanges.count)
+        
+        // Check if luminance and variance are changing in the same direction
+        let sameDirection = (avgLumChange > 0 && avgVarChange > 0) ||
+                           (avgLumChange < 0 && avgVarChange < 0)
+        
+        // Calculate consistency of changes
+        let consistentLumChanges = lumChanges.filter { change in
+            return abs(change) >= FADE_THRESHOLD * 0.8 &&
+                   ((avgLumChange > 0 && change > 0) || (avgLumChange < 0 && change < 0))
         }
         
-        let consistency = Float(consistentChanges.count) / Float(changes.count)
+        let consistentVarChanges = varChanges.filter { change in
+            return ((avgVarChange > 0 && change > 0) || (avgVarChange < 0 && change < 0))
+        }
         
-//        if frameCount % logFreq == 0 {
-//            print("Fade Analysis - Avg change per frame: \(String(format: "%.5f", avgChange))")
-//            print("Current luminance: \(String(format: "%.3f", luminances.last ?? 0))")
-//            print("Consistent changes: \(consistentChanges.count)/\(changes.count)")
-//        }
+        let lumConsistency = Float(consistentLumChanges.count) / Float(lumChanges.count)
+        let varConsistency = Float(consistentVarChanges.count) / Float(varChanges.count)
+        
+        // Calculate correlation between luminance and variance changes
+        let correlation = zip(lumChanges, varChanges).reduce(0) { sum, changes in
+            let (lum, var_) = changes
+            return sum + (lum * var_)
+        } / Float(lumChanges.count)
+        let correlationStrength = abs(correlation) / (abs(avgLumChange) * abs(avgVarChange))
+        
+        if abs(avgLumChange) >= FADE_THRESHOLD * 0.8 && lumConsistency >= FADE_CONSISTENCY_THRESHOLD {
+            let fadeType: FadeAnalysis.FadeType = avgLumChange > 0 ? .fadeIn : .fadeOut
+            
+            // Calculate confidence incorporating variance behavior
+            let magnitudeConfidence = min(abs(avgLumChange) / (FADE_THRESHOLD * 2), 1.0)
+            let consistencyConfidence = (lumConsistency + varConsistency) / 2.0
+            let correlationConfidence = min(correlationStrength, 1.0)
+            
+            // Final confidence calculation
+            // Break down the weighted sum into steps
+            let magnitudeComponent: Float = magnitudeConfidence * 0.3
+            let consistencyComponent: Float = consistencyConfidence * 0.3
+            let correlationComponent: Float = correlationConfidence * 0.2
 
-        // Determine if we have a fade
-        if abs(avgChange) >= FADE_THRESHOLD && consistency >= FADE_CONSISTENCY_THRESHOLD {
-            let fadeType: FadeAnalysis.FadeType = avgChange > 0 ? .fadeIn : .fadeOut
+            // Sum the components
+            let baseConfidence = magnitudeComponent + consistencyComponent + correlationComponent
+
+            // Apply the direction penalty
+            let varianceDirectionPenalty: Float = sameDirection ? 1.0 : 0.5
+            let confidence = baseConfidence * varianceDirectionPenalty
             
-            // Calculate confidence based on consistency and magnitude of change
-            let magnitudeConfidence = min(abs(avgChange) / (FADE_THRESHOLD * 2), 1.0)
-            let confidence = (consistency + magnitudeConfidence) / 2.0
-            
-            return FadeAnalysis(type: fadeType,
-                              confidence: confidence,
-                              averageRate: abs(avgChange))
+            return FadeAnalysis(
+                type: fadeType,
+                confidence: confidence,
+                averageRate: abs(avgLumChange)
+            )
         }
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
@@ -232,18 +273,19 @@ class SyphonRenderer {
     ) {
         let width: UInt32 = UInt32(texture.width)
         let height: UInt32 = UInt32(texture.height)
-        let luminancePointer = luminanceBuffer.contents().bindMemory(
-            to: LuminanceData.self,
+        
+        let frameAnalysisPointer = frameAnalysisBuffer.contents().bindMemory(
+            to: FrameAnalysisData.self,
             capacity: 1
         )
-        luminancePointer.pointee.width = width
-        luminancePointer.pointee.height = height
+        frameAnalysisPointer.pointee.width = width
+        frameAnalysisPointer.pointee.height = height
         
         let computeEncoder = commandBuffer.makeComputeCommandEncoder()!
         
-        computeEncoder.setComputePipelineState(luminanceVariancePipelineState)
+        computeEncoder.setComputePipelineState(computePipelineState)
         computeEncoder.setTexture(texture, index: 0)
-        computeEncoder.setBuffer(luminanceBuffer, offset: 0, index: 0)
+        computeEncoder.setBuffer(frameAnalysisBuffer, offset: 0, index: 0)
         
         let threadGroupWidth = 16
         let threadGroupHeight = 16
@@ -334,7 +376,13 @@ class SyphonRenderer {
     
     private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
         print("""
-            \(textureId) 🎬 \(fadeAnalysis.type.description) Brightness: \(String(format:"%.1f%%", luminance * 100)) Variance: \(String(format:"%.1f%%", variance * 100)) Edge density: \(String(format:"%.1f%%", edgeDensity)) Confidence: \(String(format:"%.1f%%", fadeAnalysis.confidence * 100)) Rate: \(String(format:"%.2f%%", fadeAnalysis.averageRate * 100))/frame
+        Frame: \(frameCount) / \(textureId) \
+        / 🎬 \(fadeAnalysis.type.description) \
+        / Brightness: \(String(format:"%.1f%%", luminance * 100)) \
+        / Variance: \(String(format:"%.1f%%", variance * 100)) \
+        / Edge density: \(String(format:"%.1f%%", edgeDensity)) \
+        / Confidence: \(String(format:"%.1f%%", fadeAnalysis.confidence * 100)) \
+        / Rate: \(String(format:"%.2f%%", fadeAnalysis.averageRate * 100))/frame
         """)
     }
 
@@ -357,17 +405,19 @@ class SyphonRenderer {
                 let tex = textures[i]["tex"] as! MTLTexture
                 
                 // Get luminance value from buffer
-                let luminancePointer = luminanceBuffer.contents().bindMemory(
-                    to: LuminanceData.self,
+                let frameAnalysisPointer = frameAnalysisBuffer.contents().bindMemory(
+                    to: FrameAnalysisData.self,
                     capacity: 1
                 )
 
-                luminancePointer.pointee.luminance = 0.0
-                luminancePointer.pointee.variance = 0.0
-                luminancePointer.pointee.sumLum = 0.0
-                luminancePointer.pointee.sumLumSquared = 0.0
-                luminancePointer.pointee.width = UInt32(tex.width)
-                luminancePointer.pointee.height = UInt32(tex.height)
+                frameAnalysisPointer.pointee.luminance = 0.0
+                frameAnalysisPointer.pointee.variance = 0.0
+                frameAnalysisPointer.pointee.edgeDensity = 0.0
+                frameAnalysisPointer.pointee.sumLum = 0.0
+                frameAnalysisPointer.pointee.sumLumSquared = 0.0
+                frameAnalysisPointer.pointee.sumEdges = 0.0
+                frameAnalysisPointer.pointee.width = UInt32(tex.width)
+                frameAnalysisPointer.pointee.height = UInt32(tex.height)
                 
                 let computeCommandBuffer = commandQueue.makeCommandBuffer()!
                 
@@ -377,10 +427,10 @@ class SyphonRenderer {
                 computeCommandBuffer.waitUntilCompleted()
         
                 // Calculate variance
-                let totalPixels = Float(luminancePointer.pointee.width * luminancePointer.pointee.height)
-                let sumLum = luminancePointer.pointee.sumLum
-                let sumLumSquared = luminancePointer.pointee.sumLumSquared
-        
+                let totalPixels = Float(frameAnalysisPointer.pointee.width * frameAnalysisPointer.pointee.height)
+                let sumLum = frameAnalysisPointer.pointee.sumLum
+                let sumLumSquared = frameAnalysisPointer.pointee.sumLumSquared
+                
                 let meanLum = sumLum / totalPixels
                 let meanLumSquared = sumLumSquared / totalPixels
         
@@ -388,9 +438,11 @@ class SyphonRenderer {
                 
                 let luminance = sumLum / totalPixels
                 
+                let sumEdges = frameAnalysisPointer.pointee.sumEdges
+                let edgeDensity = sumEdges / totalPixels
+                
                 // Update rolling statistics
                 let textureId = ObjectIdentifier(tex)
-                let edgeDensity: Float = 0.0
                 updateStats(textureId: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
 
                 textures[i]["lum"] = luminance
