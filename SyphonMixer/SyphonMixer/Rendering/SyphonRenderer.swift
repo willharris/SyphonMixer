@@ -63,15 +63,15 @@ class SyphonRenderer {
     private var hue: Float = 0.0
 
     // Statistical tracking with thread safety
-    private let ROLLING_WINDOW = 60
+    private let ROLLING_WINDOW = 120
     private var frameStats: [ObjectIdentifier: [FrameStats]] = [:]
     private let statsQueue = DispatchQueue(label: "com.syphonmixer.stats")
     private var frameIndices: [ObjectIdentifier: Int] = [:]
 
     // Fade detection parameters
-    private let FADE_THRESHOLD: Float = 0.003
-    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.7
-    private let MIN_FADE_FRAMES = 15
+    private let FADE_THRESHOLD: Float = 0.001      // Detect 0.1% changes per frame
+    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.45
+    private let MIN_FADE_FRAMES = 30  // Minimum number of frames to analyze
     private let fadeStateQueue = DispatchQueue(label: "com.syphonmixer.fadestate")
 
     // Track previous fade state per texture
@@ -203,6 +203,12 @@ class SyphonRenderer {
         
         let consistency = Float(consistentChanges.count) / Float(changes.count)
         
+//        if frameCount % logFreq == 0 {
+//            print("Fade Analysis - Avg change per frame: \(String(format: "%.5f", avgChange))")
+//            print("Current luminance: \(String(format: "%.3f", luminances.last ?? 0))")
+//            print("Consistent changes: \(consistentChanges.count)/\(changes.count)")
+//        }
+
         // Determine if we have a fade
         if abs(avgChange) >= FADE_THRESHOLD && consistency >= FADE_CONSISTENCY_THRESHOLD {
             let fadeType: FadeAnalysis.FadeType = avgChange > 0 ? .fadeIn : .fadeOut
@@ -223,8 +229,8 @@ class SyphonRenderer {
         texture: MTLTexture,
         commandBuffer: MTLCommandBuffer
     ) {
-        var width: UInt32 = UInt32(texture.width)
-        var height: UInt32 = UInt32(texture.height)
+        let width: UInt32 = UInt32(texture.width)
+        let height: UInt32 = UInt32(texture.height)
         let luminancePointer = luminanceBuffer.contents().bindMemory(
             to: LuminanceData.self,
             capacity: 1
