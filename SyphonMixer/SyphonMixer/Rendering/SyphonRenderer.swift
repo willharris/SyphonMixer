@@ -73,8 +73,8 @@ class SyphonRenderer {
     private var frameIndices: [ObjectIdentifier: Int] = [:]
 
     // Fade detection parameters
-    private let FADE_THRESHOLD: Float = 0.0008      // Detect 0.1% changes per frame
-    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.40
+    private let FADE_THRESHOLD: Float = 0.0008  // Detect 0.1% changes per frame
+    private let FADE_CONSISTENCY_THRESHOLD: Float = 0.40  // Consistency threshold for fade detection
     private let MIN_FADE_FRAMES = 30  // Minimum number of frames to analyze
     private let fadeStateQueue = DispatchQueue(label: "com.syphonmixer.fadestate")
 
@@ -190,14 +190,20 @@ class SyphonRenderer {
         
         let luminances = stats.map { $0.luminance }
         let variances = stats.map { $0.variance }
-        let edgeDensities = stats.map { $0.edgeDensity }
+//        let edgeDensities = stats.map { $0.edgeDensity }
 
         // Calculate total changes
         let totalLumChange = abs(luminances.last! - luminances.first!)
-        let totalVarChange = abs(variances.last! - variances.first!)
+//        let totalVarChange = abs(variances.last! - variances.first!)
+        
+        let previousAnalysis = getLastFadeState(for: textureId)
         
         // Early exit if total change is too small
         if totalLumChange < FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5 {
+            if previousAnalysis?.type != FadeAnalysis.FadeType.none {
+                print("--> None: totalLumChange \(totalLumChange) < \(FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5)")
+            }
+            
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
         }
         
@@ -262,6 +268,10 @@ class SyphonRenderer {
                 confidence: confidence,
                 averageRate: abs(avgLumChange)
             )
+        }
+        
+        if previousAnalysis?.type != FadeAnalysis.FadeType.none {
+            print("--> None: avgLumChange \(abs(avgLumChange)) < \(FADE_THRESHOLD * 0.8) && lumConsistency \(lumConsistency) < \(FADE_CONSISTENCY_THRESHOLD)")
         }
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
@@ -474,20 +484,20 @@ class SyphonRenderer {
                 // Check for fade state changes
                 let fadeAnalysis = analyzeFade(for: textureId)
                                 
-//                // Fade state update and logging
-//                // Log only when fade state changes
-//                if let lastAnalysis = getLastFadeState(for: textureId) {
-//                    if fadeAnalysis.type != lastAnalysis.type {
-//                        logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
-//                    }
-//                } else if fadeAnalysis.type != .none {
-//                    // Log initial fade detection
-//                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance)
-//                }
-                if fadeAnalysis.type != .none {
+                // Fade state update and logging
+                // Log only when fade state changes
+                if let lastAnalysis = getLastFadeState(for: textureId) {
+                    if fadeAnalysis.type != lastAnalysis.type {
+                        logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
+                    }
+                } else if fadeAnalysis.type != .none {
                     // Log initial fade detection
                     logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
                 }
+//                if fadeAnalysis.type != .none {
+//                    // Log initial fade detection
+//                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
+//                }
                 updateLastFadeState(fadeAnalysis, for: textureId)
 
                 renderEncoder.setFragmentTexture(tex, index: 0)
