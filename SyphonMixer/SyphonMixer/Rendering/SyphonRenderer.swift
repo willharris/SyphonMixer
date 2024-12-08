@@ -193,19 +193,21 @@ class SyphonRenderer {
         
         let luminances = stats.map { $0.luminance }
         let variances = stats.map { $0.variance }
-//        let edgeDensities = stats.map { $0.edgeDensity }
-
+        
         // Calculate total changes
         let totalLumChange = abs(luminances.last! - luminances.first!)
-//        let totalVarChange = abs(variances.last! - variances.first!)
+        let totalVarChange = abs(variances.last! - variances.first!)
         
         let previousAnalysis = getLastFadeState(for: textureId)
         
-        // Early exit if total change is too small
-        if totalLumChange < FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5 {
+        // Enhanced early exit using both luminance and variance changes
+        let lumThreshold = FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5
+        let varThreshold = lumThreshold * 0.3 // Variance typically changes less than luminance
+        
+        if totalLumChange < lumThreshold || totalVarChange < varThreshold {
             if previousAnalysis?.type != FadeAnalysis.FadeType.none {
                 let now = Date()
-                print("\(formatter.string(from: now))--> None: totalLumChange \(totalLumChange) < \(FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5)")
+                print("\(formatter.string(from: now)) Frame: \(frameCount) --> None: totalLumChange \(totalLumChange) < \(lumThreshold) or totalVarChange \(totalVarChange) < \(varThreshold)")
             }
             
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
@@ -233,7 +235,8 @@ class SyphonRenderer {
         }
         
         let consistentVarChanges = varChanges.filter { change in
-            return ((avgVarChange > 0 && change > 0) || (avgVarChange < 0 && change < 0))
+            return abs(change) >= FADE_THRESHOLD * 0.2 && // Lower threshold for variance
+                   ((avgVarChange > 0 && change > 0) || (avgVarChange < 0 && change < 0))
         }
         
         let lumConsistency = Float(consistentLumChanges.count) / Float(lumChanges.count)
@@ -246,24 +249,27 @@ class SyphonRenderer {
         } / Float(lumChanges.count)
         let correlationStrength = abs(correlation) / (abs(avgLumChange) * abs(avgVarChange))
         
-        if abs(avgLumChange) >= FADE_THRESHOLD * 0.8 && lumConsistency >= FADE_CONSISTENCY_THRESHOLD {
+        // Enhanced fade detection incorporating variance
+        let varChangeSignificant = abs(totalVarChange) >= varThreshold
+        if abs(avgLumChange) >= FADE_THRESHOLD * 0.8 &&
+           lumConsistency >= FADE_CONSISTENCY_THRESHOLD &&
+           varChangeSignificant {
+            
             let fadeType: FadeAnalysis.FadeType = avgLumChange > 0 ? .fadeIn : .fadeOut
             
-            // Calculate confidence incorporating variance behavior
-            let magnitudeConfidence = min(abs(avgLumChange) / (FADE_THRESHOLD * 2), 1.0)
+            // Enhanced confidence calculation including variance
+            let magnitudeConfidence = min((abs(avgLumChange) + abs(avgVarChange) * 0.3) / (FADE_THRESHOLD * 2.5), 1.0)
             let consistencyConfidence = (lumConsistency + varConsistency) / 2.0
             let correlationConfidence = min(correlationStrength, 1.0)
             
-            // Final confidence calculation
-            // Break down the weighted sum into steps
-            let magnitudeComponent: Float = magnitudeConfidence * 0.3
-            let consistencyComponent: Float = consistencyConfidence * 0.3
-            let correlationComponent: Float = correlationConfidence * 0.2
-
-            // Sum the components
+            // Weighted confidence calculation
+            let magnitudeComponent = magnitudeConfidence * 0.35
+            let consistencyComponent = consistencyConfidence * 0.35
+            let correlationComponent = correlationConfidence * 0.3
+            
             let baseConfidence = magnitudeComponent + consistencyComponent + correlationComponent
-
-            // Apply the direction penalty
+            
+            // Apply direction penalty
             let varianceDirectionPenalty: Float = sameDirection ? 1.0 : 0.5
             let confidence = baseConfidence * varianceDirectionPenalty
             
@@ -276,12 +282,12 @@ class SyphonRenderer {
         
         if previousAnalysis?.type != FadeAnalysis.FadeType.none {
             let now = Date()
-            print("\(formatter.string(from: now))--> None: avgLumChange \(abs(avgLumChange)) < \(FADE_THRESHOLD * 0.8) && lumConsistency \(lumConsistency) < \(FADE_CONSISTENCY_THRESHOLD)")
+            print("\(formatter.string(from: now)) Frame: \(frameCount) --> None: avgLumChange \(abs(avgLumChange)) < \(FADE_THRESHOLD * 0.8) or varChangeSignificant \(varChangeSignificant)")
         }
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
     }
-    
+
     private func calculateLuminanceVariance(
         texture: MTLTexture,
         commandBuffer: MTLCommandBuffer
@@ -393,7 +399,7 @@ class SyphonRenderer {
         let now = Date()
         print("""
         \(formatter.string(from: now)) \
-        Frame: \(frameCount) / \(textureId) \
+        Frame: \(frameCount) \
         / 🎬 \(fadeAnalysis.type.description) \
         / Brightness: \(String(format:"%.1f%%", luminance * 100)) \
         / Variance: \(String(format:"%.1f%%", variance * 100)) \
