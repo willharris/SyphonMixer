@@ -169,9 +169,31 @@ class VideoAnalyst {
         
         let previousAnalysis = getLastFadeState(for: textureId)
         
+        // Detect near-black state (both luminance and variance near zero)
+        let isNearBlack = luminances.last! < 0.02 && variances.last! < 0.001  // 2% brightness, 0.1% variance
+        let wasNearBlack = luminances.first! < 0.02 && variances.first! < 0.001
+        
+        // Enhanced direction check considering final values
+        let isTowardsBlack = luminances.last! < 0.2 // 20% brightness
+        let isFromBlack = luminances.first! < 0.2
+        
         // Enhanced early exit with stricter thresholds
         let lumThreshold = FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5
         let varThreshold = lumThreshold * 0.3
+        
+        // Special case for transitions to/from near-black
+        if isNearBlack || wasNearBlack {
+            let fadeType: FadeAnalysis.FadeType = isNearBlack ? .fadeOut : .fadeIn
+            let rate = totalLumChange / Float(stats.count)
+            
+            if rate >= FADE_THRESHOLD * 0.5 {
+                return FadeAnalysis(
+                    type: fadeType,
+                    confidence: 1.0,  // Maximum confidence for true black transitions
+                    averageRate: rate
+                )
+            }
+        }
         
         if totalLumChange < lumThreshold || totalVarChange < varThreshold {
             if previousAnalysis?.type != FadeAnalysis.FadeType.none {
@@ -192,12 +214,18 @@ class VideoAnalyst {
         let avgLumChange = lumChanges.reduce(0, +) / Float(lumChanges.count)
         let avgVarChange = varChanges.reduce(0, +) / Float(varChanges.count)
         
-        // Enhanced direction check considering final values
-        let isTowardsBlack = luminances.last! < 0.2 // 20% brightness
-        let isFromBlack = luminances.first! < 0.2
+        // Prevent rapid re-triggering of fades
+        if previousAnalysis?.type != FadeAnalysis.FadeType.none {
+            // If we just detected a fade, require a significant stable period before detecting another
+            let isStable = abs(avgLumChange) < FADE_THRESHOLD * 0.5
+            if !isStable {
+                return previousAnalysis!
+            }
+        }
+        
         let hasSignificantVarChange = totalVarChange >= varThreshold * 2
         
-        // Calculate consistency with higher thresholds for spurious detection
+        // Calculate consistency with stricter thresholds
         let consistentLumChanges = lumChanges.filter { change in
             return abs(change) >= FADE_THRESHOLD * 0.8 &&
                    ((avgLumChange > 0 && change > 0) || (avgLumChange < 0 && change < 0))
@@ -211,7 +239,7 @@ class VideoAnalyst {
         let lumConsistency = Float(consistentLumChanges.count) / Float(lumChanges.count)
         let varConsistency = Float(consistentVarChanges.count) / Float(varChanges.count)
         
-        // Enhanced correlation calculation
+        // Calculate correlation with more weight on consistent changes
         let correlation = zip(lumChanges, varChanges).reduce(0) { sum, changes in
             let (lum, var_) = changes
             return sum + (lum * var_)
@@ -224,36 +252,40 @@ class VideoAnalyst {
            hasSignificantVarChange {
             
             let fadeType: FadeAnalysis.FadeType
-            let endingConfidenceBoost: Float
+            var endingConfidenceBoost: Float = 0
             
             if avgLumChange > 0 {
                 fadeType = .fadeIn
-                endingConfidenceBoost = isFromBlack ? 0.3 : 0
+                endingConfidenceBoost = isFromBlack ? 0.4 : 0
             } else {
                 fadeType = .fadeOut
-                endingConfidenceBoost = isTowardsBlack ? 0.3 : 0
+                endingConfidenceBoost = isTowardsBlack ? 0.4 : 0
+                // Extra boost for fades heading towards very dark
+                if luminances.last! < 0.1 { // < 10% brightness
+                    endingConfidenceBoost += 0.2
+                }
             }
             
-            // Enhanced confidence calculation
+            // Enhanced confidence calculation with more weight on consistency
             let magnitudeConfidence = min((abs(avgLumChange) + abs(avgVarChange) * 0.5) / (FADE_THRESHOLD * 2.5), 1.0)
-            let consistencyConfidence = (lumConsistency + varConsistency) / 2.0
+            let consistencyConfidence = (lumConsistency * 0.7 + varConsistency * 0.3)  // More weight on luminance consistency
             let correlationConfidence = min(correlationStrength, 1.0)
             
-            // Weighted confidence with higher threshold for spurious fades
-            let magnitudeComponent = magnitudeConfidence * 0.4
-            let consistencyComponent = consistencyConfidence * 0.3
-            let correlationComponent = correlationConfidence * 0.3
+            // Weighted confidence calculation
+            let magnitudeComponent = magnitudeConfidence * 0.35
+            let consistencyComponent = consistencyConfidence * 0.45  // Increased weight
+            let correlationComponent = correlationConfidence * 0.2
             
             var baseConfidence = magnitudeComponent + consistencyComponent + correlationComponent
             
-            // Apply boost for true fades (near black)
+            // Apply boost for true fades
             baseConfidence += endingConfidenceBoost
-
+            
             // Cap confidence at 100%
             baseConfidence = min(baseConfidence, 1.0)
-
+            
             // Reject low confidence fades more aggressively
-            if baseConfidence < 0.4 { // Increased threshold from typical 0.25-0.3 range
+            if baseConfidence < 0.45 {  // Increased threshold
                 return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
             }
             
@@ -270,5 +302,4 @@ class VideoAnalyst {
         }
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
-    }
-}
+    }}
