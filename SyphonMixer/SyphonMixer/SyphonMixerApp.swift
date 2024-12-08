@@ -28,7 +28,7 @@ struct SyphonMixerApp: App {
                     set: { self.syphonManager.streams = $0 }
                 )
             )
-            .frame(width: 400, height: 400)
+            .frame(minWidth: 750)
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentSize)

@@ -22,6 +22,13 @@ struct FrameAnalysisData {
     var height: UInt32 = 0
 }
 
+enum VideoScalingMode: String, CaseIterable {
+    case scaleToFit = "Scale to Fit"
+    case scaleToFill = "Scale to Fill"
+    case stretchToFill = "Stretch to Fill"
+    case original = "Original Size"
+}
+
 class SyphonRenderer {
     let logger = Logger()
     let device: MTLDevice
@@ -41,6 +48,8 @@ class SyphonRenderer {
     private let formatter = DateFormatter()
     private let videoAnalyst = VideoAnalyst()
 
+    // Support scaling for video
+    private var viewportSize: SIMD2<Float> = SIMD2<Float>(1, 1)
 
     init(device: MTLDevice) {
         self.device = device
@@ -88,13 +97,24 @@ class SyphonRenderer {
         pipelineDescriptor.fragmentFunction = fragmentFunction
         
         let vertexDescriptor = MTLVertexDescriptor()
+        // Position attribute
         vertexDescriptor.attributes[0].format = .float4
         vertexDescriptor.attributes[0].offset = 0
         vertexDescriptor.attributes[0].bufferIndex = 0
+        
+        // Texture coordinate attribute
         vertexDescriptor.attributes[1].format = .float2
         vertexDescriptor.attributes[1].offset = MemoryLayout<Float>.stride * 4
         vertexDescriptor.attributes[1].bufferIndex = 0
-        vertexDescriptor.layouts[0].stride = MemoryLayout<Float>.stride * 6
+        
+        // Viewport size attribute
+        vertexDescriptor.attributes[2].format = .float2
+        vertexDescriptor.attributes[2].offset = 0
+        vertexDescriptor.attributes[2].bufferIndex = 1
+        
+        // Define layouts
+        vertexDescriptor.layouts[0].stride = MemoryLayout<Float>.stride * 6  // position + texcoord
+        vertexDescriptor.layouts[1].stride = MemoryLayout<SIMD2<Float>>.stride  // viewport size
         
         pipelineDescriptor.vertexDescriptor = vertexDescriptor
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
@@ -107,6 +127,10 @@ class SyphonRenderer {
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    }
+    
+    func updateViewportSize(width: Float, height: Float) {
+        viewportSize = SIMD2<Float>(width, height)
     }
     
     private func calculateLuminanceVariance(
@@ -150,6 +174,54 @@ class SyphonRenderer {
         computeEncoder.endEncoding()
     }
  
+    private func calculateScalingTransform(textureSize: SIMD2<Float>, scalingMode: VideoScalingMode) -> [Float] {
+        let textureAspect = textureSize.x / textureSize.y
+        let viewAspect = viewportSize.x / viewportSize.y
+        
+        var scaleX: Float = 1.0
+        var scaleY: Float = 1.0
+        
+        switch scalingMode {
+        case .scaleToFit:
+            if textureAspect > viewAspect {
+                // Fit to width
+                scaleX = 1.0
+                scaleY = viewAspect / textureAspect
+            } else {
+                // Fit to height
+                scaleX = textureAspect / viewAspect
+                scaleY = 1.0
+            }
+            
+        case .scaleToFill:
+            if textureAspect > viewAspect {
+                // Fill height
+                scaleX = textureAspect / viewAspect
+                scaleY = 1.0
+            } else {
+                // Fill width
+                scaleX = 1.0
+                scaleY = viewAspect / textureAspect
+            }
+            
+        case .stretchToFill:
+            scaleX = 1.0
+            scaleY = 1.0
+            
+        case .original:
+            scaleX = textureSize.x / viewportSize.x
+            scaleY = textureSize.y / viewportSize.y
+        }
+        
+        // Create vertex data for a fullscreen quad with scaling
+        return [
+            -scaleX, -scaleY, 0.0, 1.0,  0.0, 1.0,
+             scaleX, -scaleY, 0.0, 1.0,  1.0, 1.0,
+             scaleX,  scaleY, 0.0, 1.0,  1.0, 0.0,
+            -scaleX,  scaleY, 0.0, 1.0,  0.0, 0.0
+        ]
+    }
+
     private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
         let now = Date()
         print("""
@@ -174,11 +246,17 @@ class SyphonRenderer {
                   let texture = client.newFrameImage() else {
                 return nil
             }
-            return ["tex": texture, "alpha": Float(stream.alpha)]
+            return ["tex": texture, "alpha": Float(stream.alpha), "scalingMode": stream.scalingMode]
         }
         
         // Process luminance calculations
         if !textures.isEmpty {
+            
+            updateViewportSize(
+                    width: Float(view.drawableSize.width),
+                    height: Float(view.drawableSize.height)
+            )
+            
             for i in 0..<textures.count {
                 let tex = textures[i]["tex"] as! MTLTexture
                 
@@ -235,7 +313,6 @@ class SyphonRenderer {
         // Render textures
         let renderEncoder = renderCommandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
         renderEncoder.setRenderPipelineState(renderPipelineState)
-        renderEncoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         
         if debugTestPattern {
             _setTestPatternColour()
@@ -247,6 +324,7 @@ class SyphonRenderer {
                 let luminance = texture["lum"] as! Float
                 let variance = texture["var"] as! Float
                 let edgeDensity = texture["edge"] as! Float
+                let scalingMode = texture["scalingMode"] as! VideoScalingMode
                 let textureId = texture["id"] as! ObjectIdentifier
 
                 // Check for fade state changes
@@ -268,6 +346,16 @@ class SyphonRenderer {
 //                }
                 videoAnalyst.updateLastFadeState(fadeAnalysis, for: textureId)
 
+                // Calculate scaling transform based on texture size
+                let textureSize = SIMD2<Float>(Float(tex.width), Float(tex.height))
+                let vertices = calculateScalingTransform(textureSize: textureSize, scalingMode: scalingMode)
+                
+                // Create a new vertex buffer with scaled coordinates
+                let scaledVertexBuffer = device.makeBuffer(bytes: vertices,
+                                                           length: vertices.count * MemoryLayout<Float>.stride,
+                                                           options: [])!
+                
+                renderEncoder.setVertexBuffer(scaledVertexBuffer, offset: 0, index: 0)
                 renderEncoder.setFragmentTexture(tex, index: 0)
                 _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
             }
@@ -323,7 +411,16 @@ class SyphonRenderer {
     }
 
     private func _doRender(_ renderEncoder: MTLRenderCommandEncoder, bytes: UnsafeRawPointer, length: Int) {
+        // Set the fragment alpha/color
         renderEncoder.setFragmentBytes(bytes, length: length, index: 0)
+        
+        // Create and set the viewport size buffer
+        var viewport = viewportSize
+        renderEncoder.setVertexBytes(&viewport,
+                                   length: MemoryLayout<SIMD2<Float>>.stride,
+                                   index: 1)  // This matches bufferIndex: 1 in vertex descriptor
+        
+
         renderEncoder.drawIndexedPrimitives(type: .triangle,
                                             indexCount: 6,
                                             indexType: .uint16,

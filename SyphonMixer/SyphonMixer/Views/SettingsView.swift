@@ -38,6 +38,7 @@ struct SettingsView: View {
                 )
             }
         }
+        .frame(maxWidth: .infinity)
         .padding()
         .onChange(of: streams) { oldStreams, newStreams in
             // Create a local copy to avoid modifying while iterating

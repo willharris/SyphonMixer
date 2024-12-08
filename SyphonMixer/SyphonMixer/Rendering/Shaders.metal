@@ -15,6 +15,7 @@ using namespace metal;
 struct VertexIn {
     float4 position [[attribute(0)]];
     float2 texCoord [[attribute(1)]];
+    float2 viewportSize [[attribute(2)]];
 };
 
 struct VertexOut {
