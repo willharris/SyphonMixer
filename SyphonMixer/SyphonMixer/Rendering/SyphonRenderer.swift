@@ -63,8 +63,9 @@ class SyphonRenderer {
     private let debugTestPattern = false
     private let logFreq = 30
     private var frameCount = 0
-    private var currentColor = float4(1.0, 0.0, 0.0, 1.0)
+    private var currentColor = SIMD4<Float>(1.0, 0.0, 0.0, 1.0)
     private var hue: Float = 0.0
+    private let formatter = DateFormatter()
 
     // Statistical tracking with thread safety
     private let ROLLING_WINDOW = 120
@@ -144,6 +145,8 @@ class SyphonRenderer {
         pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+        
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     }
     
     // Thread-safe accessors for state
@@ -201,7 +204,8 @@ class SyphonRenderer {
         // Early exit if total change is too small
         if totalLumChange < FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5 {
             if previousAnalysis?.type != FadeAnalysis.FadeType.none {
-                print("--> None: totalLumChange \(totalLumChange) < \(FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5)")
+                let now = Date()
+                print("\(formatter.string(from: now))--> None: totalLumChange \(totalLumChange) < \(FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5)")
             }
             
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
@@ -271,7 +275,8 @@ class SyphonRenderer {
         }
         
         if previousAnalysis?.type != FadeAnalysis.FadeType.none {
-            print("--> None: avgLumChange \(abs(avgLumChange)) < \(FADE_THRESHOLD * 0.8) && lumConsistency \(lumConsistency) < \(FADE_CONSISTENCY_THRESHOLD)")
+            let now = Date()
+            print("\(formatter.string(from: now))--> None: avgLumChange \(abs(avgLumChange)) < \(FADE_THRESHOLD * 0.8) && lumConsistency \(lumConsistency) < \(FADE_CONSISTENCY_THRESHOLD)")
         }
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
@@ -385,7 +390,9 @@ class SyphonRenderer {
     }
     
     private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
+        let now = Date()
         print("""
+        \(formatter.string(from: now)) \
         Frame: \(frameCount) / \(textureId) \
         / 🎬 \(fadeAnalysis.type.description) \
         / Brightness: \(String(format:"%.1f%%", luminance * 100)) \
@@ -471,7 +478,7 @@ class SyphonRenderer {
         
         if debugTestPattern {
             _setTestPatternColour()
-            _doRender(renderEncoder, bytes: &currentColor, length: MemoryLayout<float4>.stride)
+            _doRender(renderEncoder, bytes: &currentColor, length: MemoryLayout<SIMD4<Float>>.stride)
         } else {
             for texture in textures {
                 let tex = texture["tex"] as! MTLTexture
@@ -527,7 +534,7 @@ class SyphonRenderer {
     }
 
     // Convert HSV to RGB color space
-    private func hsv2rgb(h: Float, s: Float, v: Float) -> float4 {
+    private func hsv2rgb(h: Float, s: Float, v: Float) -> SIMD4<Float> {
         let c = v * s
         let x = c * (1 - abs(fmod(h * 6, 2) - 1))
         let m = v - c
@@ -551,7 +558,7 @@ class SyphonRenderer {
             r = c; g = 0; b = x
         }
         
-        return float4(r + m, g + m, b + m, 1.0)
+        return SIMD4<Float>(r + m, g + m, b + m, 1.0)
     }
 
     private func _doRender(_ renderEncoder: MTLRenderCommandEncoder, bytes: UnsafeRawPointer, length: Int) {
