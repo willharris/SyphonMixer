@@ -23,6 +23,17 @@ struct StreamSelectorRow: View {
             }
             .frame(width: 200)
             
+            Toggle("Auto-fade", isOn: Binding(
+                get: { stream.autoFade },
+                set: { newValue in
+                    stream.autoFade = newValue
+                    if newValue {
+                        stream.alpha = 0.0
+                    }
+                }
+            ))
+            .frame(width: 100)
+
             Text("Alpha")
             
             Slider(value: $stream.alpha, in: 0...1)

@@ -29,6 +29,14 @@ enum VideoScalingMode: String, CaseIterable {
     case original = "Original Size"
 }
 
+struct FadeState {
+    var isTransitioning: Bool = false
+    var lastTransitionTime: TimeInterval = 0
+    var targetAlpha: Float = 1.0
+    var startAlpha: Float = 0.0
+    var transitionStartTime: TimeInterval = 0
+}
+
 class SyphonRenderer {
     let logger = Logger()
     let device: MTLDevice
@@ -47,6 +55,13 @@ class SyphonRenderer {
     private var hue: Float = 0.0
     private let formatter = DateFormatter()
     private let videoAnalyst = VideoAnalyst()
+    
+    // Auto-fade support
+    private let fadeTransitionDuration: TimeInterval = 3.0
+    private let minimumTransitionInterval: TimeInterval = 15.0
+    private let fadeConfidenceThreshold: Float = 0.8
+    private var fadeStates: [ObjectIdentifier: FadeState] = [:]
+    private var lastFrameTime: TimeInterval = 0
 
     // Support scaling for video
     private var viewportSize: SIMD2<Float> = SIMD2<Float>(1, 1)
@@ -127,6 +142,63 @@ class SyphonRenderer {
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    }
+    
+    private func updateFadeState(for textureId: ObjectIdentifier,
+                               fadeAnalysis: FadeAnalysis,
+                               currentAlpha: Float,
+                               stream: SyphonStream) -> Float {
+        let currentTime = Date().timeIntervalSince1970
+        
+        // Initialize fade state if needed
+        if fadeStates[textureId] == nil {
+            fadeStates[textureId] = FadeState()
+        }
+        
+        guard let fadeState = fadeStates[textureId] else { return currentAlpha }
+        
+        // If not transitioning, check if we should start a new transition
+        if !fadeState.isTransitioning {
+            let timeSinceLastTransition = currentTime - fadeState.lastTransitionTime
+            
+            if fadeAnalysis.confidence >= fadeConfidenceThreshold &&
+               timeSinceLastTransition >= minimumTransitionInterval {
+                
+                // Check if we're in the correct state to start the transition
+                let canStartFadeIn = fadeAnalysis.type == .fadeIn && abs(currentAlpha) < 0.01
+                let canStartFadeOut = fadeAnalysis.type == .fadeOut && abs(currentAlpha - 1.0) < 0.01
+                
+                if canStartFadeIn || canStartFadeOut {
+                    var newFadeState = fadeState
+                    newFadeState.isTransitioning = true
+                    newFadeState.lastTransitionTime = currentTime
+                    newFadeState.transitionStartTime = currentTime
+                    newFadeState.startAlpha = currentAlpha
+                    newFadeState.targetAlpha = fadeAnalysis.type == .fadeIn ? 1.0 : 0.0
+                    fadeStates[textureId] = newFadeState
+                    return currentAlpha // First frame of transition
+                }
+            }
+        }
+        
+        // If we're transitioning, update the alpha value
+        if fadeState.isTransitioning {
+            let elapsedTime = currentTime - fadeState.transitionStartTime
+            
+            if elapsedTime >= fadeTransitionDuration {
+                // Transition complete
+                var newFadeState = fadeState
+                newFadeState.isTransitioning = false
+                fadeStates[textureId] = newFadeState
+                return fadeState.targetAlpha
+            } else {
+                // Calculate interpolated alpha
+                let progress = Float(elapsedTime / fadeTransitionDuration)
+                return fadeState.startAlpha + (fadeState.targetAlpha - fadeState.startAlpha) * progress
+            }
+        }
+        
+        return currentAlpha
     }
     
     func updateViewportSize(width: Float, height: Float) {
@@ -246,7 +318,11 @@ class SyphonRenderer {
                   let texture = client.newFrameImage() else {
                 return nil
             }
-            return ["tex": texture, "alpha": Float(stream.alpha), "scalingMode": stream.scalingMode]
+            return ["tex": texture,
+                    "alpha": Float(stream.alpha),
+                    "scalingMode": stream.scalingMode,
+                    "autoFade": stream.autoFade,
+                    "stream": stream]
         }
         
         // Process luminance calculations
@@ -324,12 +400,22 @@ class SyphonRenderer {
                 let luminance = texture["lum"] as! Float
                 let variance = texture["var"] as! Float
                 let edgeDensity = texture["edge"] as! Float
+                let stream = texture["stream"] as! SyphonStream
                 let scalingMode = texture["scalingMode"] as! VideoScalingMode
+                let autoFade = texture["autoFade"] as! Bool
                 let textureId = texture["id"] as! ObjectIdentifier
 
                 // Check for fade state changes
                 let fadeAnalysis = videoAnalyst.analyzeFade(for: textureId, frameCount: frameCount)
                                 
+                // Update alpha if auto-fade is enabled
+                if autoFade {
+                    alpha = updateFadeState(for: textureId,
+                                         fadeAnalysis: fadeAnalysis,
+                                         currentAlpha: alpha,
+                                         stream: stream)
+                }
+
                 // Fade state update and logging
                 // Log only when fade state changes
                 if let lastAnalysis = videoAnalyst.getLastFadeState(for: textureId) {

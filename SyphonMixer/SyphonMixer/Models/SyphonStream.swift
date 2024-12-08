@@ -14,6 +14,7 @@ struct SyphonStream: Identifiable, Equatable {
     var client: SyphonMetalClient?
     var alpha: Double = 1.0
     var scalingMode: VideoScalingMode = .original
+    var autoFade: Bool = false
     
     static func == (lhs: SyphonStream, rhs: SyphonStream) -> Bool {
           return lhs.id == rhs.id && lhs.serverName == rhs.serverName
