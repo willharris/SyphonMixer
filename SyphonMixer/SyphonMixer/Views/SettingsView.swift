@@ -10,11 +10,11 @@ import Metal
 
 struct SettingsView: View {
     @Binding var streams: [SyphonStream]
-    @StateObject private var syphonManager: SyphonManager
+    private let syphonManager: SyphonManager
     
-    init(streams: Binding<[SyphonStream]>) {
+    init(streams: Binding<[SyphonStream]>, manager: SyphonManager) {
         self._streams = streams
-        self._syphonManager = StateObject(wrappedValue: SyphonManager())
+        self.syphonManager = manager
     }
     
     var body: some View {

@@ -8,9 +8,7 @@
 import SwiftUI
 import Metal
 
-struct ContentView: View {
-    @State private var isFullScreen = false
-    
+struct ContentView: View {    
     let device: MTLDevice
     let manager: SyphonManager
     let commandQueue: MTLCommandQueue
