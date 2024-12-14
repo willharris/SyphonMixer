@@ -50,6 +50,7 @@ struct StreamSelectorRow: View {
             Button(action: onAdd) {
                 Image(systemName: "plus.circle.fill")
             }
+            .disabled(stream.serverName.isEmpty)
             
             Button(action: onRemove) {
                 Image(systemName: "minus.circle.fill")
