@@ -12,7 +12,8 @@ struct StreamSelectorRow: View {
     let availableServers: [String]
     let onAdd: () -> Void
     let onRemove: () -> Void
-    
+    let isLastStream: Bool
+
     var body: some View {
         HStack {
             Picker("Stream", selection: $stream.serverName) {
@@ -53,6 +54,7 @@ struct StreamSelectorRow: View {
             Button(action: onRemove) {
                 Image(systemName: "minus.circle.fill")
             }
+            .disabled(isLastStream)
         }
         .padding(.horizontal)
     }

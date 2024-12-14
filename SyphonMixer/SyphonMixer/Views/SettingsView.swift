@@ -27,14 +27,16 @@ struct SettingsView: View {
                         streams.append(SyphonStream(serverName: ""))
                     },
                     onRemove: {
-                        if let index = streams.firstIndex(where: { $0.id == stream.id }) {
+                        if streams.count > 1,
+                           let index = streams.firstIndex(where: { $0.id == stream.id }) {
                             // Cleanup existing client if any
                             if let client = streams[index].client {
                                 client.stop()
                             }
                             streams.remove(at: index)
                         }
-                    }
+                    },
+                    isLastStream: streams.count == 1
                 )
             }
         }
