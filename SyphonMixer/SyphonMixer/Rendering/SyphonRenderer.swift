@@ -32,9 +32,10 @@ enum VideoScalingMode: String, CaseIterable {
 struct FadeState {
     var isTransitioning: Bool = false
     var lastTransitionTime: TimeInterval = 0
-    var targetAlpha: Float = 1.0
+    var targetAlpha: Float = 0.0  // Start with 0.0 as default
     var startAlpha: Float = 0.0
     var transitionStartTime: TimeInterval = 0
+    var isFadedIn: Bool = false   // Track whether we're in a faded-in state
 }
 
 class SyphonRenderer {
@@ -145,61 +146,60 @@ class SyphonRenderer {
     }
     
     private func updateFadeState(for textureId: ObjectIdentifier,
-                               fadeAnalysis: FadeAnalysis,
-                               currentAlpha: Float,
-                               stream: SyphonStream) -> Float {
-        let currentTime = Date().timeIntervalSince1970
-        
-        // Initialize fade state if needed
-        if fadeStates[textureId] == nil {
-            fadeStates[textureId] = FadeState()
-        }
-        
-        guard let fadeState = fadeStates[textureId] else { return currentAlpha }
-        
-        // If not transitioning, check if we should start a new transition
-        if !fadeState.isTransitioning {
-            let timeSinceLastTransition = currentTime - fadeState.lastTransitionTime
-            
-            if fadeAnalysis.confidence >= fadeConfidenceThreshold &&
-               timeSinceLastTransition >= minimumTransitionInterval {
-                
-                // Check if we're in the correct state to start the transition
-                let canStartFadeIn = fadeAnalysis.type == .fadeIn && abs(currentAlpha) < 0.01
-                let canStartFadeOut = fadeAnalysis.type == .fadeOut && abs(currentAlpha - 1.0) < 0.01
-                
-                if canStartFadeIn || canStartFadeOut {
-                    var newFadeState = fadeState
-                    newFadeState.isTransitioning = true
-                    newFadeState.lastTransitionTime = currentTime
-                    newFadeState.transitionStartTime = currentTime
-                    newFadeState.startAlpha = currentAlpha
-                    newFadeState.targetAlpha = fadeAnalysis.type == .fadeIn ? 1.0 : 0.0
-                    fadeStates[textureId] = newFadeState
-                    return currentAlpha // First frame of transition
-                }
-            }
-        }
-        
-        // If we're transitioning, update the alpha value
-        if fadeState.isTransitioning {
-            let elapsedTime = currentTime - fadeState.transitionStartTime
-            
-            if elapsedTime >= fadeTransitionDuration {
-                // Transition complete
-                var newFadeState = fadeState
-                newFadeState.isTransitioning = false
-                fadeStates[textureId] = newFadeState
-                return fadeState.targetAlpha
-            } else {
-                // Calculate interpolated alpha
-                let progress = Float(elapsedTime / fadeTransitionDuration)
-                return fadeState.startAlpha + (fadeState.targetAlpha - fadeState.startAlpha) * progress
-            }
-        }
-        
-        return currentAlpha
-    }
+                                fadeAnalysis: FadeAnalysis,
+                                currentAlpha: Float,
+                                stream: SyphonStream) -> Float {
+         let currentTime = Date().timeIntervalSince1970
+         
+         // Initialize fade state if needed
+         if fadeStates[textureId] == nil {
+             fadeStates[textureId] = FadeState()
+         }
+         
+         guard var fadeState = fadeStates[textureId] else { return currentAlpha }
+         
+         // If not transitioning, check if we should start a new transition
+         if !fadeState.isTransitioning {
+             let timeSinceLastTransition = currentTime - fadeState.lastTransitionTime
+             
+             if fadeAnalysis.confidence >= fadeConfidenceThreshold &&
+                timeSinceLastTransition >= minimumTransitionInterval {
+                 
+                 // Only start fade-in if we're not already faded in
+                 let canStartFadeIn = fadeAnalysis.type == .fadeIn && !fadeState.isFadedIn
+                 // Only start fade-out if we're currently faded in
+                 let canStartFadeOut = fadeAnalysis.type == .fadeOut && fadeState.isFadedIn
+                 
+                 if canStartFadeIn || canStartFadeOut {
+                     fadeState.isTransitioning = true
+                     fadeState.lastTransitionTime = currentTime
+                     fadeState.transitionStartTime = currentTime
+                     fadeState.startAlpha = currentAlpha
+                     fadeState.targetAlpha = fadeAnalysis.type == .fadeIn ? 1.0 : 0.0
+                     fadeStates[textureId] = fadeState
+                     return currentAlpha // First frame of transition
+                 }
+             }
+             
+             // If not starting a new transition, maintain current state
+             return fadeState.isFadedIn ? 1.0 : 0.0
+         }
+         
+         // If we're transitioning, update the alpha value
+         let elapsedTime = currentTime - fadeState.transitionStartTime
+         
+         if elapsedTime >= fadeTransitionDuration {
+             // Transition complete - update fade state
+             fadeState.isTransitioning = false
+             fadeState.isFadedIn = fadeState.targetAlpha > 0.5  // Consider > 0.5 as faded in
+             fadeStates[textureId] = fadeState
+             return fadeState.targetAlpha
+         } else {
+             // Calculate interpolated alpha
+             let progress = Float(elapsedTime / fadeTransitionDuration)
+             return fadeState.startAlpha + (fadeState.targetAlpha - fadeState.startAlpha) * progress
+         }
+     }
     
     func updateViewportSize(width: Float, height: Float) {
         viewportSize = SIMD2<Float>(width, height)
