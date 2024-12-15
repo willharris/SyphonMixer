@@ -135,11 +135,13 @@ class SyphonRenderer {
         pipelineDescriptor.vertexDescriptor = vertexDescriptor
         pipelineDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
-        pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .one
         pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-        pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .sourceAlpha
+        pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
         pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-        
+        pipelineDescriptor.colorAttachments[0].rgbBlendOperation = .add
+        pipelineDescriptor.colorAttachments[0].alphaBlendOperation = .add
+
         renderPipelineState = try! device.makeRenderPipelineState(descriptor: pipelineDescriptor)
         
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"

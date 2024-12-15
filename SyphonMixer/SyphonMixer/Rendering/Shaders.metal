@@ -41,7 +41,8 @@ fragment float4 fragment_main(VertexOut in [[stage_in]],
     constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
     float2 flippedTexCoord = float2(in.texCoord.x, 1.0 - in.texCoord.y);
     float4 color = texture.sample(textureSampler, flippedTexCoord);
-    return float4(color.rgb, color.a * alpha);
+    // Premultiply the RGB by alpha
+    return float4(color.rgb * alpha, alpha);
 }
 
 //
