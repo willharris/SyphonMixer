@@ -34,6 +34,7 @@ struct FadeState {
     var lastTransitionTime: TimeInterval = 0
     var targetAlpha: Float = 0.0  // Start with 0.0 as default
     var startAlpha: Float = 0.0
+    var currentAlpha: Float = 0.0  // Track the current alpha
     var transitionStartTime: TimeInterval = 0
     var isFadedIn: Bool = false   // Track whether we're in a faded-in state
 }
@@ -148,17 +149,19 @@ class SyphonRenderer {
     }
     
     private func updateFadeState(for textureId: ObjectIdentifier,
-                                fadeAnalysis: FadeAnalysis,
-                                currentAlpha: Float,
-                                stream: SyphonStream) -> Float {
+                                 fadeAnalysis: FadeAnalysis,
+                                 streamAlpha: Float,
+                                 stream: SyphonStream) -> Float {
          let currentTime = Date().timeIntervalSince1970
          
          // Initialize fade state if needed
          if fadeStates[textureId] == nil {
-             fadeStates[textureId] = FadeState()
+             var initialState = FadeState()
+             initialState.currentAlpha = 0.0  // Start faded out
+             fadeStates[textureId] = initialState
          }
          
-         guard var fadeState = fadeStates[textureId] else { return currentAlpha }
+         guard var fadeState = fadeStates[textureId] else { return 0.0 }
          
          // If not transitioning, check if we should start a new transition
          if !fadeState.isTransitioning {
@@ -176,32 +179,40 @@ class SyphonRenderer {
                      fadeState.isTransitioning = true
                      fadeState.lastTransitionTime = currentTime
                      fadeState.transitionStartTime = currentTime
-                     fadeState.startAlpha = currentAlpha
+                     fadeState.startAlpha = fadeState.currentAlpha  // Use current tracked alpha
                      fadeState.targetAlpha = fadeAnalysis.type == .fadeIn ? 1.0 : 0.0
                      fadeStates[textureId] = fadeState
-                     return currentAlpha // First frame of transition
+                     
+                     return fadeState.currentAlpha // Return current alpha for first frame
                  }
              }
              
-             // If not starting a new transition, maintain current state
-             return fadeState.isFadedIn ? 1.0 : 0.0
+             // If not transitioning, maintain current state
+             return fadeState.currentAlpha
          }
          
          // If we're transitioning, update the alpha value
          let elapsedTime = currentTime - fadeState.transitionStartTime
          
          if elapsedTime >= fadeTransitionDuration {
-             // Transition complete - update fade state
+             // Transition complete
              fadeState.isTransitioning = false
-             fadeState.isFadedIn = fadeState.targetAlpha > 0.5  // Consider > 0.5 as faded in
+             fadeState.isFadedIn = fadeState.targetAlpha > 0.5
+             fadeState.currentAlpha = fadeState.targetAlpha  // Update current alpha
              fadeStates[textureId] = fadeState
-             return fadeState.targetAlpha
+             return fadeState.currentAlpha
          } else {
              // Calculate interpolated alpha
-             let progress = Float(elapsedTime / fadeTransitionDuration)
-             return fadeState.startAlpha + (fadeState.targetAlpha - fadeState.startAlpha) * progress
+             let progress = min(1.0, Float(elapsedTime / fadeTransitionDuration))
+             let newAlpha = fadeState.startAlpha + (fadeState.targetAlpha - fadeState.startAlpha) * progress
+             
+             // Update current alpha
+             fadeState.currentAlpha = newAlpha
+             fadeStates[textureId] = fadeState
+             
+             return newAlpha
          }
-     }
+    }
     
     func updateViewportSize(width: Float, height: Float) {
         viewportSize = SIMD2<Float>(width, height)
@@ -413,9 +424,16 @@ class SyphonRenderer {
                 // Update alpha if auto-fade is enabled
                 if autoFade {
                     alpha = updateFadeState(for: textureId,
-                                         fadeAnalysis: fadeAnalysis,
-                                         currentAlpha: alpha,
-                                         stream: stream)
+                                            fadeAnalysis: fadeAnalysis,
+                                            streamAlpha: alpha,
+                                            stream: stream)
+//                    if frameCount % logFreq == 0 {
+//                        print("\(frameCount) - \(stream.serverName) - Auto-fade: \(alpha)")
+//                    }
+                } else {
+//                    if frameCount % logFreq == 0 {
+//                        print("\(frameCount) - \(stream.serverName) - Manual fade: \(alpha)")
+//                    }
                 }
 
                 // Fade state update and logging
