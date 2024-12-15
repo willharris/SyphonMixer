@@ -66,7 +66,7 @@ struct SyphonMixerApp: App {
                 ),
                 manager: self.syphonManager
             )
-            .frame(minWidth: 750)
+            .frame(minWidth: 850)
         }
         .windowStyle(.titleBar)
 //        .windowStyle(.titleBar)

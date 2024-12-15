@@ -33,7 +33,7 @@ struct StreamSelectorRow: View {
                     Text(server).tag(server)
                 }
             }
-            .frame(width: 200)
+            .frame(width: 300)
             
             Toggle("Auto-fade", isOn: Binding(
                 get: { stream.autoFade },
