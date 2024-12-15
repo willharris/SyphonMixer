@@ -13,10 +13,21 @@ struct StreamSelectorRow: View {
     let onAdd: () -> Void
     let onRemove: () -> Void
     let isLastStream: Bool
+    
+    // Helper computed property to ensure selection is always valid
+    private var validServerName: String {
+        if availableServers.contains(stream.serverName) {
+            return stream.serverName
+        }
+        return ""
+    }
 
     var body: some View {
         HStack {
-            Picker("Stream", selection: $stream.serverName) {
+            Picker("Stream", selection: Binding(
+                get: { validServerName },
+                set: { stream.serverName = $0 }
+            )) {
                 Text("None").tag("")
                 ForEach(availableServers, id: \.self) { server in
                     Text(server).tag(server)
