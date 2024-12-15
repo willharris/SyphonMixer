@@ -7,21 +7,66 @@
 
 import os
 
+import Combine
 import SwiftUI
 import MetalKit
 
+// The coordinator that handles subscriptions and Metal work
+class MetalViewCoordinator: NSObject, MTKViewDelegate {
+    var parent: MetalView
+    var streams: [SyphonStream]
+    private var renderer: SyphonRenderer!
+    private var cancellables: Set<AnyCancellable> = []
+    
+    init(_ parent: MetalView) {
+        self.parent = parent
+        self.streams = parent.manager.streams
+        super.init()
+        setupEventHandling()
+    }
+    
+    private func setupEventHandling() {
+        StreamConfigurationEvents.shared.publisher
+            .sink { [weak self] event in
+                guard let self = self else { return }
+                switch event {
+                case .alphaChanged(let stream):
+                    self.renderer.handleStreamAlphaChange(stream: stream)
+                case .autoFadeToggled(let stream):
+                    self.renderer.handleStreamConfigurationChange(stream: stream)
+                }
+            }
+            .store(in: &self.cancellables)
+    }
+    
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        if renderer == nil {
+            renderer = SyphonRenderer(device: parent.device)
+        }
+    }
+    
+    func draw(in view: MTKView) {
+        guard let drawable = view.currentDrawable,
+              let renderPassDescriptor = view.currentRenderPassDescriptor else {
+            return
+        }
+        let commandQueue = parent.commandQueue
+        
+        let renderCommandBuffer = renderer.render(streams: streams,
+                               in: view,
+                               commandQueue: commandQueue,
+                               renderPassDescriptor: renderPassDescriptor)
+        renderCommandBuffer.present(drawable)
+        renderCommandBuffer.commit()
+    }
+}
+
+// The view struct that implements NSViewRepresentable
 struct MetalView: NSViewRepresentable {
     @ObservedObject var manager: SyphonManager
     let device: MTLDevice
     let commandQueue: MTLCommandQueue
-    private var renderer: SyphonRenderer!
 
-    public init(manager: SyphonManager, device: MTLDevice, commandQueue: MTLCommandQueue) {
-        self.manager = manager
-        self.device = device
-        self.commandQueue = commandQueue
-    }
-    
     func makeNSView(context: Context) -> MTKView {
         let mtkView = MTKView(frame: .zero, device: device)
         mtkView.delegate = context.coordinator
@@ -35,38 +80,7 @@ struct MetalView: NSViewRepresentable {
         context.coordinator.streams = manager.streams
     }
     
-    func makeCoordinator() -> Coordinator {
-        Coordinator(self)
-    }
-    
-    class Coordinator: NSObject, MTKViewDelegate {
-        var parent: MetalView
-        var streams: [SyphonStream]
-        
-        init(_ parent: MetalView) {
-            self.parent = parent
-            self.streams = parent.manager.streams
-        }
-        
-        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-            if parent.renderer == nil {
-                parent.renderer = SyphonRenderer(device: parent.device)
-            }
-        }
-        
-        func draw(in view: MTKView) {
-            guard let drawable = view.currentDrawable,
-                  let renderPassDescriptor = view.currentRenderPassDescriptor else {
-                return
-            }
-            let commandQueue = parent.commandQueue
-            
-            let renderCommandBuffer = parent.renderer.render(streams: streams,
-                                   in: view,
-                                   commandQueue: commandQueue,
-                                   renderPassDescriptor: renderPassDescriptor)
-            renderCommandBuffer.present(drawable)
-            renderCommandBuffer.commit()
-        }
+    func makeCoordinator() -> MetalViewCoordinator {
+        MetalViewCoordinator(self)
     }
 }

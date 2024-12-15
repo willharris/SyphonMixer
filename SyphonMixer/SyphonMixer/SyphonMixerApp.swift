@@ -5,8 +5,21 @@
 //  Created by William Harris on 19.11.2024.
 //
 
+import Combine
 import SwiftUI
 
+
+enum StreamConfigurationEvent {
+    case alphaChanged(SyphonStream)
+    case autoFadeToggled(SyphonStream)
+}
+
+class StreamConfigurationEvents: ObservableObject {
+    static let shared = StreamConfigurationEvents()
+    let publisher = PassthroughSubject<StreamConfigurationEvent, Never>()
+    
+    private init() {} // Singleton
+}
 
 @main
 struct SyphonMixerApp: App {

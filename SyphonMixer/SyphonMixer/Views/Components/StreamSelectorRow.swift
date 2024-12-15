@@ -42,15 +42,22 @@ struct StreamSelectorRow: View {
                     if newValue {
                         stream.alpha = 0.0
                     }
+                    StreamConfigurationEvents.shared.publisher.send(.autoFadeToggled(stream))
                 }
             ))
             .frame(width: 100)
 
             Text("Alpha")
             
-            Slider(value: $stream.alpha, in: 0...1)
-                .frame(width: 100)
-            
+            Slider(value: Binding(
+                get: { stream.alpha },
+                set: { newValue in
+                    stream.alpha = newValue
+                    StreamConfigurationEvents.shared.publisher.send(.alphaChanged(stream))
+                }
+            ), in: 0...1)
+            .frame(width: 100)
+
             Picker("Scaling", selection: $stream.scalingMode) {
                 ForEach(VideoScalingMode.allCases, id: \.self) { mode in
                     Text(mode.rawValue).tag(mode)

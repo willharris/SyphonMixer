@@ -148,6 +148,57 @@ class SyphonRenderer {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
     }
     
+    // Handle changes to auto-fade stream configuration
+    func handleStreamConfigurationChange(stream: SyphonStream) {
+        guard let client = stream.client else { return }
+        let textureId = ObjectIdentifier(client)
+        
+        if stream.autoFade {
+            // Initialize fresh fade state when auto-fade is enabled
+            var newState = FadeState()
+            newState.currentAlpha = Float(stream.alpha)
+            newState.isFadedIn = stream.alpha > 0.5
+            fadeStates[textureId] = newState
+            
+            logger.debug("Initialized new fade state for \(stream.serverName) with alpha \(stream.alpha)")
+        } else {
+            // Clear fade state when auto-fade is disabled
+            fadeStates.removeValue(forKey: textureId)
+            logger.debug("Cleared fade state for \(stream.serverName)")
+        }
+    }
+
+    // Handle manual changes to stream alpha
+    func handleStreamAlphaChange(stream: SyphonStream) {
+        guard let client = stream.client else { return }
+        let textureId = ObjectIdentifier(client)
+        
+        // If auto-fade is off, clear any existing fade state
+        if !stream.autoFade {
+            fadeStates.removeValue(forKey: textureId)
+            return
+        }
+        
+        // If auto-fade is on, update the current fade state
+        if var fadeState = fadeStates[textureId] {
+            // Only update if we're not in the middle of a transition
+            if !fadeState.isTransitioning {
+                fadeState.currentAlpha = Float(stream.alpha)
+                fadeState.isFadedIn = stream.alpha > 0.5
+                fadeStates[textureId] = fadeState
+//                logger.debug("Updated fade state for \(stream.serverName) to alpha \(stream.alpha)")
+            } else {
+                logger.debug("Skipped fade state update for \(stream.serverName) - transition in progress")
+            }
+        }
+    }
+
+    // Completely reset the fade system
+    func resetFadeStates() {
+        fadeStates.removeAll()
+        logger.debug("Reset all fade states")
+    }
+
     private func updateFadeState(for textureId: ObjectIdentifier,
                                  fadeAnalysis: FadeAnalysis,
                                  streamAlpha: Float,
