@@ -60,7 +60,7 @@ class SyphonRenderer {
     
     // Auto-fade support
     private let fadeTransitionDuration: TimeInterval = 3.0
-    private let minimumTransitionInterval: TimeInterval = 15.0
+    private let minimumTransitionInterval: TimeInterval = 3.0
     private let fadeConfidenceThreshold: Float = 0.8
     private var fadeStates: [ObjectIdentifier: FadeState] = [:]
     private var lastFrameTime: TimeInterval = 0
@@ -478,13 +478,9 @@ class SyphonRenderer {
                                             fadeAnalysis: fadeAnalysis,
                                             streamAlpha: alpha,
                                             stream: stream)
-//                    if frameCount % logFreq == 0 {
-//                        print("\(frameCount) - \(stream.serverName) - Auto-fade: \(alpha)")
-//                    }
-                } else {
-//                    if frameCount % logFreq == 0 {
-//                        print("\(frameCount) - \(stream.serverName) - Manual fade: \(alpha)")
-//                    }
+                    if frameCount % logFreq == 0 && alpha != 0.0 && alpha != 1.0{
+                        print("\(frameCount) - \(stream.serverName) - Auto-fade: \(alpha)")
+                    }
                 }
 
                 // Fade state update and logging
@@ -497,10 +493,6 @@ class SyphonRenderer {
                     // Log initial fade detection
                     logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
                 }
-//                if fadeAnalysis.type != .none {
-//                    // Log initial fade detection
-//                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
-//                }
                 videoAnalyst.updateLastFadeState(fadeAnalysis, for: textureId)
 
                 // Calculate scaling transform based on texture size

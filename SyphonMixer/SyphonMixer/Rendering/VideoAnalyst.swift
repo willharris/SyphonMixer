@@ -11,18 +11,27 @@ struct FrameStats {
     let variance: Float
     let edgeDensity: Float
     let frameIndex: Int
+    let timestamp: TimeInterval
+}
+
+struct BlackFrameState {
+    var isBlack: Bool = false
+    var blackFrameStartTime: TimeInterval = 0
+    var consecutiveBlackFrames: Int = 0
 }
 
 struct FadeAnalysis {
     enum FadeType {
         case none
         case fadeIn
+        case potentialFadeOut
         case fadeOut
         
         var description: String {
             switch self {
             case .none: return "No fade"
             case .fadeIn: return "Fade IN"
+            case .potentialFadeOut: return "Potential Fade OUT"
             case .fadeOut: return "Fade OUT"
             }
         }
@@ -35,22 +44,32 @@ struct FadeAnalysis {
 
 class VideoAnalyst {
     private let formatter = DateFormatter()
-
+    
     // Statistical tracking with thread safety
     private let ROLLING_WINDOW = 120
     private var frameStats: [ObjectIdentifier: [FrameStats]] = [:]
     private let statsQueue = DispatchQueue(label: "com.syphonmixer.stats")
     private var frameIndices: [ObjectIdentifier: Int] = [:]
-
+    
     // Fade detection parameters
-    private let FADE_THRESHOLD: Float = 0.0008  // Detect 0.1% changes per frame
+    private let FADE_THRESHOLD: Float = 0.0008  // Detect 0.08% changes per frame
     private let FADE_CONSISTENCY_THRESHOLD: Float = 0.40  // Consistency threshold for fade detection
     private let MIN_FADE_FRAMES = 30  // Minimum number of frames to analyze
     private let fadeStateQueue = DispatchQueue(label: "com.syphonmixer.fadestate")
-
+    
+    // Black frame detection parameters
+    private let BLACK_LUMINANCE_THRESHOLD: Float = 0.01  // 1% maximum brightness for black
+    private let BLACK_VARIANCE_THRESHOLD: Float = 0.001  // 0.1% maximum variance for black
+    private let REQUIRED_BLACK_DURATION: TimeInterval = 0.5  // Configurable duration in seconds
+    private var blackFrameStates: [ObjectIdentifier: BlackFrameState] = [:]
+    
     // Track previous fade state per texture
     private var lastFadeState: [ObjectIdentifier: FadeAnalysis] = [:]
 
+    init() {
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    }
+    
     // Thread-safe accessors for state
     func getFrameStats(for textureId: ObjectIdentifier) -> [FrameStats]? {
         var result: [FrameStats]?
@@ -93,9 +112,10 @@ class VideoAnalyst {
             self.frameIndices[textureId] = currentIndex + 1
             
             let newStats = FrameStats(luminance: luminance,
-                                    variance: variance,
-                                    edgeDensity: edgeDensity,
-                                    frameIndex: currentIndex)
+                                      variance: variance,
+                                      edgeDensity: edgeDensity,
+                                      frameIndex: currentIndex,
+                                      timestamp: Date().timeIntervalSince1970)
             
             if self.frameStats[textureId] == nil {
                 self.frameStats[textureId] = []
@@ -148,7 +168,37 @@ class VideoAnalyst {
         return (lumSlope, varSlope)
     }
     
-
+    private func updateBlackFrameState(textureId: ObjectIdentifier, stats: FrameStats) -> Bool {
+        var state = blackFrameStates[textureId] ?? BlackFrameState()
+        let currentTime = stats.timestamp
+        
+        let isBlackFrame = stats.luminance < BLACK_LUMINANCE_THRESHOLD && stats.variance < BLACK_VARIANCE_THRESHOLD
+        
+        if isBlackFrame {
+            if !state.isBlack {
+                // First black frame
+                state.isBlack = true
+                state.blackFrameStartTime = currentTime
+                state.consecutiveBlackFrames = 1
+            } else {
+                state.consecutiveBlackFrames += 1
+            }
+        } else {
+            state.isBlack = false
+            state.consecutiveBlackFrames = 0
+        }
+        
+        blackFrameStates[textureId] = state
+        
+        // Check if we've had black frames for the required duration
+        if state.isBlack {
+            let blackDuration = currentTime - state.blackFrameStartTime
+            return blackDuration >= REQUIRED_BLACK_DURATION
+        }
+        
+        return false
+    }
+    
     func analyzeFade(for textureId: ObjectIdentifier, frameCount: Int) -> FadeAnalysis {
         var localStats: [FrameStats]?
         statsQueue.sync {
@@ -160,146 +210,148 @@ class VideoAnalyst {
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
         }
         
+        // First, check if we have enough black frames at any point - this overrides everything else
+        guard let latestStats = stats.last else {
+            return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
+        }
+        
+        if updateBlackFrameState(textureId: textureId, stats: latestStats) {
+            return FadeAnalysis(type: .fadeOut, confidence: 1.0, averageRate: 0)
+        }
+        
         let luminances = stats.map { $0.luminance }
         let variances = stats.map { $0.variance }
         
+        // Calculate frame-to-frame changes
+        var lumChanges: [Float] = []
+        for i in 1..<stats.count {
+            lumChanges.append(luminances[i] - luminances[i-1])
+        }
+        
+        let avgLumChange = lumChanges.reduce(0, +) / Float(lumChanges.count)
+        let previousAnalysis = getLastFadeState(for: textureId)
+        
+        // Phase 2: If we're already in a potential fade out, just check if it's still getting darker
+        if previousAnalysis?.type == .potentialFadeOut {
+            // Check if we're getting brighter (fade out interrupted)
+            let recentLumChange = luminances.last! - luminances.dropLast().last!
+            if recentLumChange > FADE_THRESHOLD * 0.5 {
+                let now = Date()
+                print("\(formatter.string(from: now)) Frame: \(frameCount) --> Potential fade out interrupted: brightness increasing: \(recentLumChange) > \(FADE_THRESHOLD * 0.5)")
+                return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
+            }
+            
+            // Continue tracking the fade out
+            return FadeAnalysis(
+                type: .potentialFadeOut,
+                confidence: previousAnalysis!.confidence,
+                averageRate: abs(avgLumChange)
+            )
+        }
+        
+        // Phase 1: Initial detection using confidence calculation
         // Calculate total changes
         let totalLumChange = abs(luminances.last! - luminances.first!)
         let totalVarChange = abs(variances.last! - variances.first!)
-        
-        let previousAnalysis = getLastFadeState(for: textureId)
-        
-        // Detect near-black state (both luminance and variance near zero)
-        let isNearBlack = luminances.last! < 0.02 && variances.last! < 0.001  // 2% brightness, 0.1% variance
-        let wasNearBlack = luminances.first! < 0.02 && variances.first! < 0.001
-        
-        // Enhanced direction check considering final values
-        let isTowardsBlack = luminances.last! < 0.2 // 20% brightness
-        let isFromBlack = luminances.first! < 0.2
         
         // Enhanced early exit with stricter thresholds
         let lumThreshold = FADE_THRESHOLD * Float(MIN_FADE_FRAMES) * 0.5
         let varThreshold = lumThreshold * 0.3
         
-        // Special case for transitions to/from near-black
-        if isNearBlack || wasNearBlack {
-            let fadeType: FadeAnalysis.FadeType = isNearBlack ? .fadeOut : .fadeIn
-            let rate = totalLumChange / Float(stats.count)
-            
-            if rate >= FADE_THRESHOLD * 0.5 {
-                return FadeAnalysis(
-                    type: fadeType,
-                    confidence: 1.0,  // Maximum confidence for true black transitions
-                    averageRate: rate
-                )
-            }
-        }
-        
         if totalLumChange < lumThreshold || totalVarChange < varThreshold {
-            if previousAnalysis?.type != FadeAnalysis.FadeType.none {
-                let now = Date()
-                print("\(formatter.string(from: now)) Frame: \(frameCount) --> None: totalLumChange \(totalLumChange) < \(lumThreshold) or totalVarChange \(totalVarChange) < \(varThreshold)")
-            }
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
-        }
-        
-        // Calculate frame-to-frame changes
-        var lumChanges: [Float] = []
-        var varChanges: [Float] = []
-        for i in 1..<stats.count {
-            lumChanges.append(luminances[i] - luminances[i-1])
-            varChanges.append(variances[i] - variances[i-1])
-        }
-        
-        let avgLumChange = lumChanges.reduce(0, +) / Float(lumChanges.count)
-        let avgVarChange = varChanges.reduce(0, +) / Float(varChanges.count)
-        
-        // Prevent rapid re-triggering of fades
-        if previousAnalysis?.type != FadeAnalysis.FadeType.none {
-            // If we just detected a fade, require a significant stable period before detecting another
-            let isStable = abs(avgLumChange) < FADE_THRESHOLD * 0.5
-            if !isStable {
-                return previousAnalysis!
-            }
         }
         
         let hasSignificantVarChange = totalVarChange >= varThreshold * 2
         
-        // Calculate consistency with stricter thresholds
+        // Calculate consistency
         let consistentLumChanges = lumChanges.filter { change in
             return abs(change) >= FADE_THRESHOLD * 0.8 &&
                    ((avgLumChange > 0 && change > 0) || (avgLumChange < 0 && change < 0))
         }
         
-        let consistentVarChanges = varChanges.filter { change in
-            return abs(change) >= FADE_THRESHOLD * 0.2 &&
-                   ((avgVarChange > 0 && change > 0) || (avgVarChange < 0 && change < 0))
-        }
-        
         let lumConsistency = Float(consistentLumChanges.count) / Float(lumChanges.count)
-        let varConsistency = Float(consistentVarChanges.count) / Float(varChanges.count)
-        
-        // Calculate correlation with more weight on consistent changes
-        let correlation = zip(lumChanges, varChanges).reduce(0) { sum, changes in
-            let (lum, var_) = changes
-            return sum + (lum * var_)
-        } / Float(lumChanges.count)
-        let correlationStrength = abs(correlation) / (abs(avgLumChange) * abs(avgVarChange))
         
         // Enhanced fade detection with stricter criteria
         if abs(avgLumChange) >= FADE_THRESHOLD * 0.8 &&
            lumConsistency >= FADE_CONSISTENCY_THRESHOLD &&
            hasSignificantVarChange {
             
-            let fadeType: FadeAnalysis.FadeType
-            var endingConfidenceBoost: Float = 0
+            let fadeType: FadeAnalysis.FadeType = avgLumChange > 0 ? .fadeIn : .fadeOut
             
-            if avgLumChange > 0 {
-                fadeType = .fadeIn
-                endingConfidenceBoost = isFromBlack ? 0.4 : 0
-            } else {
-                fadeType = .fadeOut
-                endingConfidenceBoost = isTowardsBlack ? 0.4 : 0
-                // Extra boost for fades heading towards very dark
-                if luminances.last! < 0.1 { // < 10% brightness
-                    endingConfidenceBoost += 0.2
+            let confidence = calculateFadeConfidence(
+                lumChange: avgLumChange,
+                varChange: totalVarChange,
+                consistency: lumConsistency,
+                currentLuminance: luminances.last!,
+                targetLuminance: fadeType == .fadeIn ? luminances.last! : luminances.first!
+            )
+            
+            // Only proceed if confidence meets minimum threshold
+            if confidence >= 0.6 {
+                if fadeType == .fadeOut {
+                    let now = Date()
+                    print("\(formatter.string(from: now)) Frame: \(frameCount) --> Potential fade out detected with confidence \(confidence)")
+                    return FadeAnalysis(type: .potentialFadeOut, confidence: confidence, averageRate: abs(avgLumChange))
+                } else {
+                    return FadeAnalysis(type: .fadeIn, confidence: confidence, averageRate: abs(avgLumChange))
                 }
             }
-            
-            // Enhanced confidence calculation with more weight on consistency
-            let magnitudeConfidence = min((abs(avgLumChange) + abs(avgVarChange) * 0.5) / (FADE_THRESHOLD * 2.5), 1.0)
-            let consistencyConfidence = (lumConsistency * 0.7 + varConsistency * 0.3)  // More weight on luminance consistency
-            let correlationConfidence = min(correlationStrength, 1.0)
-            
-            // Weighted confidence calculation
-            let magnitudeComponent = magnitudeConfidence * 0.35
-            let consistencyComponent = consistencyConfidence * 0.45  // Increased weight
-            let correlationComponent = correlationConfidence * 0.2
-            
-            var baseConfidence = magnitudeComponent + consistencyComponent + correlationComponent
-            
-            // Apply boost for true fades
-            baseConfidence += endingConfidenceBoost
-            
-            // Cap confidence at 100%
-            baseConfidence = min(baseConfidence, 1.0)
-            
-            // Reject low confidence fades more aggressively
-            if baseConfidence < 0.45 {  // Increased threshold
-                return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
-            }
-            
-            return FadeAnalysis(
-                type: fadeType,
-                confidence: baseConfidence,
-                averageRate: abs(avgLumChange)
-            )
-        }
-        
-        if previousAnalysis?.type != FadeAnalysis.FadeType.none {
-            let now = Date()
-            print("\(formatter.string(from: now)) Frame: \(frameCount) --> None: avgLumChange \(abs(avgLumChange)) < \(FADE_THRESHOLD * 0.8) or hasSignificantVarChange \(hasSignificantVarChange)")
         }
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
-    }}
+    }
+
+    private func calculateFadeConfidence(
+            lumChange: Float,
+            varChange: Float,
+            consistency: Float,
+            currentLuminance: Float,
+            targetLuminance: Float
+        ) -> Float {
+            // Magnitude confidence based on luminance and variance changes
+            let magnitudeConfidence = min((abs(lumChange) + abs(varChange) * 0.5) / (FADE_THRESHOLD * 2.0), 1.0)
+            
+            // Direction confidence - how well does the change match expected fade behavior
+            let directionConfidence: Float
+            if lumChange > 0 {  // Fade in
+                // For fade in, we want to see movement away from darkness
+                directionConfidence = targetLuminance > 0.15 ? 1.0 : 0.5  // Boost if we're heading to significant brightness
+            } else {  // Fade out
+                // For fade out, we want to see movement toward near-black
+                directionConfidence = targetLuminance < 0.05 ? 1.0 : 0.5  // Boost if we're heading to near-black
+            }
+            
+            // Rate confidence - changes should be smooth but significant
+            let rateConfidence = min(abs(lumChange) / (FADE_THRESHOLD * 0.5), 1.0)
+            
+            // Calculate weighted components
+            let weights: [Float] = [0.35, 0.35, 0.15, 0.15]  // Must sum to 1.0
+            let components: [Float] = [
+                magnitudeConfidence,
+                consistency,
+                directionConfidence,
+                rateConfidence
+            ]
+            
+            var confidence: Float = 0
+            for (weight, component) in zip(weights, components) {
+                confidence += weight * component
+            }
+            
+            // Add situational boosts
+            if lumChange < 0 {  // Fade out
+                if currentLuminance < 0.05 && abs(lumChange) >= FADE_THRESHOLD {
+                    // Boost confidence if we're already very dark and still changing
+                    confidence += 0.1
+                }
+            } else {  // Fade in
+                if currentLuminance > 0.2 && abs(lumChange) >= FADE_THRESHOLD {
+                    // Boost confidence if we're reaching good brightness and still changing
+                    confidence += 0.1
+                }
+            }
+            
+            // Final normalization
+            return min(confidence, 1.0)
+        }}
