@@ -233,11 +233,17 @@ class VideoAnalyst {
         
         // Phase 2: If we're already in a potential fade out, just check if it's still getting darker
         if previousAnalysis?.type == .potentialFadeOut {
-            // Check if we're getting brighter (fade out interrupted)
-            let recentLumChange = luminances.last! - luminances.dropLast().last!
-            if recentLumChange > FADE_THRESHOLD * 0.5 {
+            // Look at last few frames to determine trend
+            let windowSize = min(15, luminances.count)
+            let recentLuminances = Array(luminances.suffix(windowSize))
+            let avgRecentChange = zip(recentLuminances.dropFirst(), recentLuminances.dropLast())
+                .map { $0 - $1 }
+                .reduce(0, +) / Float(windowSize - 1)
+            
+            // Only interrupt if we're getting consistently brighter
+            if avgRecentChange > FADE_THRESHOLD * 0.5 {
                 let now = Date()
-                print("\(formatter.string(from: now)) Frame: \(frameCount) --> Potential fade out interrupted: brightness increasing: \(recentLumChange) > \(FADE_THRESHOLD * 0.5)")
+                print("\(formatter.string(from: now)) Frame: \(frameCount) --> Potential fade out interrupted: average brightness increasing: \(avgRecentChange) > \(FADE_THRESHOLD * 0.5)")
                 return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
             }
             
