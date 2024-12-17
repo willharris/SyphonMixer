@@ -13,7 +13,7 @@ struct SyphonStream: Identifiable, Equatable {
     var serverName: String
     var client: SyphonMetalClient?
     var alpha: Double = 1.0
-    var scalingMode: VideoScalingMode = .scaleToFit
+    var scalingMode: VideoScalingMode = .scaleToFill
     var autoFade: Bool = false
     
     static func == (lhs: SyphonStream, rhs: SyphonStream) -> Bool {
