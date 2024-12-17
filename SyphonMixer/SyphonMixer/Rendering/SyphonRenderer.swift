@@ -61,7 +61,7 @@ class SyphonRenderer {
     // Auto-fade support
     private let fadeTransitionDuration: TimeInterval = 3.0
     private let minimumTransitionInterval: TimeInterval = 3.0
-    private let fadeConfidenceThreshold: Float = 0.8
+    private let fadeConfidenceThreshold: Float = 0.7
     private var fadeStates: [ObjectIdentifier: FadeState] = [:]
     private var lastFrameTime: TimeInterval = 0
 

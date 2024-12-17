@@ -43,7 +43,10 @@ struct FadeAnalysis {
 }
 
 class VideoAnalyst {
+    // Debug logging parameters
+    private let debug = false
     private let formatter = DateFormatter()
+    private var frameCount = -1
     
     // Statistical tracking with thread safety
     private let ROLLING_WINDOW = 120
@@ -68,6 +71,13 @@ class VideoAnalyst {
 
     init() {
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    }
+    
+    private func debug(_ message: String) {
+        if debug {
+            let now = Date()
+            print(formatter.string(from: now) + " Frame: \(frameCount) --> " + message)
+        }
     }
     
     // Thread-safe accessors for state
@@ -168,11 +178,15 @@ class VideoAnalyst {
         return (lumSlope, varSlope)
     }
     
+    private func isBlackFrame(stats: FrameStats) -> Bool {
+        stats.luminance < BLACK_LUMINANCE_THRESHOLD && stats.variance < BLACK_VARIANCE_THRESHOLD
+    }
+    
     private func updateBlackFrameState(textureId: ObjectIdentifier, stats: FrameStats) -> Bool {
         var state = blackFrameStates[textureId] ?? BlackFrameState()
         let currentTime = stats.timestamp
         
-        let isBlackFrame = stats.luminance < BLACK_LUMINANCE_THRESHOLD && stats.variance < BLACK_VARIANCE_THRESHOLD
+        let isBlackFrame = isBlackFrame(stats: stats)
         
         if isBlackFrame {
             if !state.isBlack {
@@ -200,6 +214,9 @@ class VideoAnalyst {
     }
     
     func analyzeFade(for textureId: ObjectIdentifier, frameCount: Int) -> FadeAnalysis {
+        self.frameCount = frameCount
+        debug("Analyzing fade for texture \(textureId)")
+        
         var localStats: [FrameStats]?
         statsQueue.sync {
             localStats = frameStats[textureId]
@@ -207,15 +224,46 @@ class VideoAnalyst {
         
         guard let stats = localStats,
               stats.count >= MIN_FADE_FRAMES else {
+            debug("Early exit 1: Not enough frames for fade analysis")
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
         }
         
         // First, check if we have enough black frames at any point - this overrides everything else
         guard let latestStats = stats.last else {
+            debug("Early exit 2: No stats available")
             return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
         }
         
+        // Track fade in from black
+        if let firstStats = stats.first, isBlackFrame(stats: firstStats) {
+            // Look at the progression from black
+            let windowSize = min(15, stats.count)
+            let recentStats = Array(stats.prefix(windowSize))
+            
+            // Calculate how many frames have increased beyond black threshold
+            let nonBlackFrames = recentStats.filter { !isBlackFrame(stats: $0) }
+            let nonBlackRatio = Float(nonBlackFrames.count) / Float(recentStats.count)
+            
+            // Check if we have a consistent increase in brightness
+            let brightnessTrend = zip(recentStats.dropFirst(), recentStats.dropLast())
+                .map { $0.luminance - $1.luminance }
+                .filter { $0 > 0 }
+                .count
+            
+            let trendRatio = Float(brightnessTrend) / Float(recentStats.count - 1)
+            
+            if nonBlackRatio > 0.3 && trendRatio > 0.4 {
+                return FadeAnalysis(
+                    type: .fadeIn,
+                    confidence: min(nonBlackRatio * 1.5, 1.0),
+                    averageRate: (latestStats.luminance - firstStats.luminance) / Float(windowSize)
+                )
+            }
+            debug("No fade detected: nonBlackRatio: \(nonBlackRatio), trendRatio: \(trendRatio)")
+        }
+
         if updateBlackFrameState(textureId: textureId, stats: latestStats) {
+            debug("Black frame detected meeting criteria, last frame: \(latestStats)")
             return FadeAnalysis(type: .fadeOut, confidence: 1.0, averageRate: 0)
         }
         
@@ -243,7 +291,7 @@ class VideoAnalyst {
             // Only interrupt if we're getting consistently brighter
             if avgRecentChange > FADE_THRESHOLD * 0.5 {
                 let now = Date()
-                print("\(formatter.string(from: now)) Frame: \(frameCount) --> Potential fade out interrupted: average brightness increasing: \(avgRecentChange) > \(FADE_THRESHOLD * 0.5)")
+                debug("Potential fade out interrupted: average brightness increasing: \(avgRecentChange) > \(FADE_THRESHOLD * 0.5)")
                 return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
             }
             
@@ -297,13 +345,41 @@ class VideoAnalyst {
             if confidence >= 0.6 {
                 if fadeType == .fadeOut {
                     let now = Date()
-                    print("\(formatter.string(from: now)) Frame: \(frameCount) --> Potential fade out detected with confidence \(confidence)")
+                    debug("Potential fade out detected with confidence \(confidence)")
                     return FadeAnalysis(type: .potentialFadeOut, confidence: confidence, averageRate: abs(avgLumChange))
                 } else {
                     return FadeAnalysis(type: .fadeIn, confidence: confidence, averageRate: abs(avgLumChange))
                 }
             }
         }
+        
+        // Check for gradual fade in
+        let windowSize = min(30, luminances.count)
+        let recentLuminances = Array(luminances.suffix(windowSize))
+        let totalChange = recentLuminances.last! - recentLuminances.first!
+        let avgChange = totalChange / Float(windowSize - 1)
+
+        if avgChange > 0 && // Brightness increasing
+           totalChange > (FADE_THRESHOLD * 3) && // Significant total change
+           luminances.first! < 0.3 { // Started relatively dark
+            
+            // Calculate how consistent the increase is
+            let increases = zip(recentLuminances.dropFirst(), recentLuminances.dropLast())
+                .filter { $0 > $1 }
+                .count
+            let increaseRatio = Float(increases) / Float(windowSize - 1)
+            
+            if increaseRatio > 0.6 { // At least 60% of frames show increase
+                debug("Gradual fade in detected: totalChange: \(totalChange), increaseRatio: \(increaseRatio)")
+                return FadeAnalysis(
+                    type: .fadeIn,
+                    confidence: min(increaseRatio * 1.2, 1.0),
+                    averageRate: avgChange
+                )
+            }
+        }
+        
+        debug("No fade detected: lumChange: \(avgLumChange), varChange: \(totalVarChange), lumConsistency: \(lumConsistency)")
         
         return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
     }
