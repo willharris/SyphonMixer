@@ -59,7 +59,7 @@ class SyphonRenderer {
     private let videoAnalyst = VideoAnalyst()
     
     // Auto-fade support
-    private let fadeTransitionDuration: TimeInterval = 3.0
+    private let fadeTransitionDuration: TimeInterval = 2.0
     private let minimumTransitionInterval: TimeInterval = 3.0
     private let fadeConfidenceThreshold: Float = 0.7
     private var fadeStates: [ObjectIdentifier: FadeState] = [:]
