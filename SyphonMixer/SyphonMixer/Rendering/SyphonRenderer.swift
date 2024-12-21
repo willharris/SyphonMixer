@@ -398,7 +398,17 @@ class SyphonRenderer {
             )
             
             for i in 0..<textures.count {
+                let alpha = textures[i]["alpha"] as! Float
+                let autoFade = textures[i]["autoFade"] as! Bool
                 let tex = textures[i]["tex"] as! MTLTexture
+                
+                let textureId = ObjectIdentifier(tex)
+                textures[i]["id"] = textureId
+
+                // Early exit if auto-fade is disabled and alpha is 0
+                if !autoFade && alpha == 0.0 {
+                    continue
+                }
                 
                 // Get luminance value from buffer
                 let frameAnalysisPointer = frameAnalysisBuffer.contents().bindMemory(
@@ -438,13 +448,11 @@ class SyphonRenderer {
                 let edgeDensity = sumEdges / totalPixels
                 
                 // Update rolling statistics
-                let textureId = ObjectIdentifier(tex)
                 videoAnalyst.updateStats(textureId: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
 
                 textures[i]["lum"] = luminance
                 textures[i]["var"] = variance
                 textures[i]["edge"] = edgeDensity
-                textures[i]["id"] = textureId
             }
         }
         
@@ -461,9 +469,6 @@ class SyphonRenderer {
             for texture in textures {
                 let tex = texture["tex"] as! MTLTexture
                 var alpha = texture["alpha"] as! Float
-                let luminance = texture["lum"] as! Float
-                let variance = texture["var"] as! Float
-                let edgeDensity = texture["edge"] as! Float
                 let stream = texture["stream"] as! SyphonStream
                 let scalingMode = texture["scalingMode"] as! VideoScalingMode
                 let autoFade = texture["autoFade"] as! Bool
@@ -478,10 +483,17 @@ class SyphonRenderer {
                                             fadeAnalysis: fadeAnalysis,
                                             streamAlpha: alpha,
                                             stream: stream)
-                    if frameCount % logFreq == 0 && alpha != 0.0 && alpha != 1.0{
+                    if frameCount % logFreq == 0 && alpha != 0.0 && alpha != 1.0 {
                         print("\(frameCount) - \(stream.serverName) - Auto-fade: \(alpha)")
                     }
+                } else if alpha == 0.0 {
+                    // Skip rendering if alpha is 0
+                    continue
                 }
+
+                let luminance = texture["lum"] as! Float
+                let variance = texture["var"] as! Float
+                let edgeDensity = texture["edge"] as! Float
 
                 // Fade state update and logging
                 // Log only when fade state changes
@@ -495,6 +507,10 @@ class SyphonRenderer {
                 }
                 videoAnalyst.updateLastFadeState(fadeAnalysis, for: textureId)
 
+                if alpha == 0.0 {
+                    continue
+                }
+                
                 // Calculate scaling transform based on texture size
                 let textureSize = SIMD2<Float>(Float(tex.width), Float(tex.height))
                 let vertices = calculateScalingTransform(textureSize: textureSize, scalingMode: scalingMode)
