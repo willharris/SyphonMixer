@@ -111,8 +111,10 @@ class VideoAnalyst {
         return result
     }
     
-    func updateStats(textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
+    func updateStats(for tex: FrameTexture) {
         statsQueue.async {
+            let textureId = tex.texId
+            
             // Increment or initialize frame index for this texture
             if self.frameIndices[textureId] == nil {
                 self.frameIndices[textureId] = 0
@@ -121,9 +123,9 @@ class VideoAnalyst {
             let currentIndex = self.frameIndices[textureId]!
             self.frameIndices[textureId] = currentIndex + 1
             
-            let newStats = FrameStats(luminance: luminance,
-                                      variance: variance,
-                                      edgeDensity: edgeDensity,
+            let newStats = FrameStats(luminance: tex.luminance,
+                                      variance: tex.variance,
+                                      edgeDensity: tex.edgeDensity,
                                       frameIndex: currentIndex,
                                       timestamp: Date().timeIntervalSince1970)
             

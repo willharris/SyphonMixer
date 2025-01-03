@@ -10,6 +10,25 @@ import Metal
 import Syphon
 import MetalKit
 
+struct FrameTexture {
+    let tex: MTLTexture
+    let texId: ObjectIdentifier
+    let alpha: Float
+    let scalingMode: VideoScalingMode
+    let autoFade: Bool
+    let stream: SyphonStream
+    
+    var luminance: Float = 0.0
+    var variance: Float = 0.0
+    var edgeDensity: Float = 0.0
+    
+    mutating func updateTextureStats(luminance: Float, variance: Float, edgeDensity: Float) {
+        self.luminance = luminance
+        self.variance = variance
+        self.edgeDensity = edgeDensity
+    }
+}
+
 struct FrameAnalysisData {
     var luminance: Float = -1.0
     var variance: Float = -1.0
@@ -265,7 +284,7 @@ class SyphonRenderer {
          }
     }
     
-    func updateViewportSize(width: Float, height: Float) {
+    private func updateViewportSize(width: Float, height: Float) {
         viewportSize = SIMD2<Float>(width, height)
     }
     
@@ -358,18 +377,67 @@ class SyphonRenderer {
         ]
     }
 
-    private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for textureId: ObjectIdentifier, luminance: Float, variance: Float, edgeDensity: Float) {
+    private func logFadeTransition(_ fadeAnalysis: FadeAnalysis, for tex: FrameTexture) {
         let now = Date()
         print("""
         \(formatter.string(from: now)) \
         Frame: \(frameCount) \
         / 🎬 \(fadeAnalysis.type.description) \
-        / Brightness: \(String(format:"%.1f%%", luminance * 100)) \
-        / Variance: \(String(format:"%.1f%%", variance * 100)) \
-        / Edge density: \(String(format:"%.1f%%", edgeDensity)) \
+        / Brightness: \(String(format:"%.1f%%", tex.luminance * 100)) \
+        / Variance: \(String(format:"%.1f%%", tex.variance * 100)) \
+        / Edge density: \(String(format:"%.1f%%", tex.edgeDensity)) \
         / Confidence: \(String(format:"%.1f%%", fadeAnalysis.confidence * 100)) \
         / Rate: \(String(format:"%.2f%%", fadeAnalysis.averageRate * 100))/frame
         """)
+    }
+    
+    private func calculateTextureStatistics(commandQueue: MTLCommandQueue, frameTexture: inout FrameTexture) {
+        // Early exit if auto-fade is disabled and alpha is 0
+        if !frameTexture.autoFade && frameTexture.alpha == 0.0 {
+            return
+        }
+        
+        // Get luminance value from buffer
+        let frameAnalysisPointer = frameAnalysisBuffer.contents().bindMemory(
+            to: FrameAnalysisData.self,
+            capacity: 1
+        )
+
+        frameAnalysisPointer.pointee.luminance = 0.0
+        frameAnalysisPointer.pointee.variance = 0.0
+        frameAnalysisPointer.pointee.edgeDensity = 0.0
+        frameAnalysisPointer.pointee.sumLum = 0.0
+        frameAnalysisPointer.pointee.sumLumSquared = 0.0
+        frameAnalysisPointer.pointee.sumEdges = 0.0
+        frameAnalysisPointer.pointee.width = UInt32(frameTexture.tex.width)
+        frameAnalysisPointer.pointee.height = UInt32(frameTexture.tex.height)
+        
+        let computeCommandBuffer = commandQueue.makeCommandBuffer()!
+        
+        calculateLuminanceVariance(texture: frameTexture.tex, commandBuffer: computeCommandBuffer)
+        
+        computeCommandBuffer.commit()
+        computeCommandBuffer.waitUntilCompleted()
+
+        // Calculate variance
+        let totalPixels = Float(frameAnalysisPointer.pointee.width * frameAnalysisPointer.pointee.height)
+        let sumLum = frameAnalysisPointer.pointee.sumLum
+        let sumLumSquared = frameAnalysisPointer.pointee.sumLumSquared
+        
+        let meanLum = sumLum / totalPixels
+        let meanLumSquared = sumLumSquared / totalPixels
+
+        let variance = max(0, meanLumSquared - (meanLum * meanLum))
+        
+        let luminance = sumLum / totalPixels
+        
+        let sumEdges = frameAnalysisPointer.pointee.sumEdges
+        let edgeDensity = sumEdges / totalPixels
+
+        frameTexture.updateTextureStats(luminance: luminance, variance: variance, edgeDensity: edgeDensity)
+        
+        // Update rolling statistics
+        videoAnalyst.updateStats(for: frameTexture)
     }
 
     func render(streams: [SyphonStream],
@@ -377,109 +445,46 @@ class SyphonRenderer {
                 commandQueue: MTLCommandQueue,
                 renderPassDescriptor: MTLRenderPassDescriptor) -> MTLCommandBuffer
     {
-        var textures = streams.compactMap { stream -> [String: Any]? in
-            guard let client = stream.client,
-                  let texture = client.newFrameImage() else {
-                return nil
-            }
-            return ["tex": texture,
-                    "alpha": Float(stream.alpha),
-                    "scalingMode": stream.scalingMode,
-                    "autoFade": stream.autoFade,
-                    "stream": stream]
-        }
-        
-        // Process luminance calculations
-        if !textures.isEmpty {
-            
-            updateViewportSize(
-                    width: Float(view.drawableSize.width),
-                    height: Float(view.drawableSize.height)
-            )
-            
-            for i in 0..<textures.count {
-                let alpha = textures[i]["alpha"] as! Float
-                let autoFade = textures[i]["autoFade"] as! Bool
-                let tex = textures[i]["tex"] as! MTLTexture
-                
-                let textureId = ObjectIdentifier(tex)
-                textures[i]["id"] = textureId
 
-                // Early exit if auto-fade is disabled and alpha is 0
-                if !autoFade && alpha == 0.0 {
-                    continue
-                }
-                
-                // Get luminance value from buffer
-                let frameAnalysisPointer = frameAnalysisBuffer.contents().bindMemory(
-                    to: FrameAnalysisData.self,
-                    capacity: 1
-                )
-
-                frameAnalysisPointer.pointee.luminance = 0.0
-                frameAnalysisPointer.pointee.variance = 0.0
-                frameAnalysisPointer.pointee.edgeDensity = 0.0
-                frameAnalysisPointer.pointee.sumLum = 0.0
-                frameAnalysisPointer.pointee.sumLumSquared = 0.0
-                frameAnalysisPointer.pointee.sumEdges = 0.0
-                frameAnalysisPointer.pointee.width = UInt32(tex.width)
-                frameAnalysisPointer.pointee.height = UInt32(tex.height)
-                
-                let computeCommandBuffer = commandQueue.makeCommandBuffer()!
-                
-                calculateLuminanceVariance(texture: tex, commandBuffer: computeCommandBuffer)
-                
-                computeCommandBuffer.commit()
-                computeCommandBuffer.waitUntilCompleted()
-        
-                // Calculate variance
-                let totalPixels = Float(frameAnalysisPointer.pointee.width * frameAnalysisPointer.pointee.height)
-                let sumLum = frameAnalysisPointer.pointee.sumLum
-                let sumLumSquared = frameAnalysisPointer.pointee.sumLumSquared
-                
-                let meanLum = sumLum / totalPixels
-                let meanLumSquared = sumLumSquared / totalPixels
-        
-                let variance = max(0, meanLumSquared - (meanLum * meanLum))
-                
-                let luminance = sumLum / totalPixels
-                
-                let sumEdges = frameAnalysisPointer.pointee.sumEdges
-                let edgeDensity = sumEdges / totalPixels
-                
-                // Update rolling statistics
-                videoAnalyst.updateStats(textureId: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
-
-                textures[i]["lum"] = luminance
-                textures[i]["var"] = variance
-                textures[i]["edge"] = edgeDensity
-            }
-        }
+        updateViewportSize(
+                width: Float(view.drawableSize.width),
+                height: Float(view.drawableSize.height)
+        )
         
         let renderCommandBuffer = commandQueue.makeCommandBuffer()!
-        
-        // Render textures
         let renderEncoder = renderCommandBuffer.makeRenderCommandEncoder(descriptor: renderPassDescriptor)!
         renderEncoder.setRenderPipelineState(renderPipelineState)
         
         if debugTestPattern {
-            _setTestPatternColour()
-            _doRender(renderEncoder, bytes: &currentColor, length: MemoryLayout<SIMD4<Float>>.stride)
+            setTestPatternColour()
+            doRender(renderEncoder, bytes: &currentColor, length: MemoryLayout<SIMD4<Float>>.stride)
         } else {
-            for texture in textures {
-                let tex = texture["tex"] as! MTLTexture
-                var alpha = texture["alpha"] as! Float
-                let stream = texture["stream"] as! SyphonStream
-                let scalingMode = texture["scalingMode"] as! VideoScalingMode
-                let autoFade = texture["autoFade"] as! Bool
-                let textureId = texture["id"] as! ObjectIdentifier
+            for stream in streams {
+                guard let client = stream.client,
+                      let texture = client.newFrameImage() else {
+                    continue
+                }
+                
+                var frameTexture = FrameTexture(
+                    tex: texture,
+                    texId: ObjectIdentifier(texture),
+                    alpha: Float(stream.alpha),
+                    scalingMode: stream.scalingMode,
+                    autoFade: stream.autoFade,
+                    stream: stream
+                )
+       
+                calculateTextureStatistics(commandQueue: commandQueue, frameTexture: &frameTexture)
 
                 // Check for fade state changes
-                let fadeAnalysis = videoAnalyst.analyzeFade(for: textureId, frameCount: frameCount)
+                let fadeAnalysis = videoAnalyst.analyzeFade(for: frameTexture.texId, frameCount: frameCount)
                                 
+                let texId = frameTexture.texId
+                var alpha = frameTexture.alpha
+                
                 // Update alpha if auto-fade is enabled
-                if autoFade {
-                    alpha = updateFadeState(for: textureId,
+                if frameTexture.autoFade {
+                    alpha = updateFadeState(for: texId,
                                             fadeAnalysis: fadeAnalysis,
                                             streamAlpha: alpha,
                                             stream: stream)
@@ -491,29 +496,25 @@ class SyphonRenderer {
                     continue
                 }
 
-                let luminance = texture["lum"] as! Float
-                let variance = texture["var"] as! Float
-                let edgeDensity = texture["edge"] as! Float
-
                 // Fade state update and logging
                 // Log only when fade state changes
-                if let lastAnalysis = videoAnalyst.getLastFadeState(for: textureId) {
+                if let lastAnalysis = videoAnalyst.getLastFadeState(for: texId) {
                     if fadeAnalysis.type != lastAnalysis.type {
-                        logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
+                        logFadeTransition(fadeAnalysis, for: frameTexture)
                     }
                 } else if fadeAnalysis.type != .none {
                     // Log initial fade detection
-                    logFadeTransition(fadeAnalysis, for: textureId, luminance: luminance, variance: variance, edgeDensity: edgeDensity)
+                    logFadeTransition(fadeAnalysis, for: frameTexture)
                 }
-                videoAnalyst.updateLastFadeState(fadeAnalysis, for: textureId)
+                videoAnalyst.updateLastFadeState(fadeAnalysis, for: texId)
 
                 if alpha == 0.0 {
                     continue
                 }
                 
                 // Calculate scaling transform based on texture size
-                let textureSize = SIMD2<Float>(Float(tex.width), Float(tex.height))
-                let vertices = calculateScalingTransform(textureSize: textureSize, scalingMode: scalingMode)
+                let textureSize = SIMD2<Float>(Float(frameTexture.tex.width), Float(frameTexture.tex.height))
+                let vertices = calculateScalingTransform(textureSize: textureSize, scalingMode: frameTexture.scalingMode)
                 
                 // Create a new vertex buffer with scaled coordinates
                 let scaledVertexBuffer = device.makeBuffer(bytes: vertices,
@@ -521,8 +522,8 @@ class SyphonRenderer {
                                                            options: [])!
                 
                 renderEncoder.setVertexBuffer(scaledVertexBuffer, offset: 0, index: 0)
-                renderEncoder.setFragmentTexture(tex, index: 0)
-                _doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
+                renderEncoder.setFragmentTexture(frameTexture.tex, index: 0)
+                doRender(renderEncoder, bytes: &alpha, length: MemoryLayout<Float>.stride)
             }
         }
         frameCount += 1
@@ -534,7 +535,7 @@ class SyphonRenderer {
     
     // Create a test render method
     // Use "fragment_main_test" shader function to render a test pattern - set above as fragmentFunction
-    private func _setTestPatternColour() {
+    private func setTestPatternColour() {
         // Increment hue (0.0 to 1.0) each frame
         hue += 0.002  // Adjust this value to change sweep speed
         
@@ -575,7 +576,7 @@ class SyphonRenderer {
         return SIMD4<Float>(r + m, g + m, b + m, 1.0)
     }
 
-    private func _doRender(_ renderEncoder: MTLRenderCommandEncoder, bytes: UnsafeRawPointer, length: Int) {
+    private func doRender(_ renderEncoder: MTLRenderCommandEncoder, bytes: UnsafeRawPointer, length: Int) {
         // Set the fragment alpha/color
         renderEncoder.setFragmentBytes(bytes, length: length, index: 0)
         
