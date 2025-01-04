@@ -69,7 +69,7 @@ class SyphonManager: ObservableObject {
             if stream.serverName == serverDescription {
                 // Reset the stream to empty state
                 DispatchQueue.main.async {
-                    self.streams[index] = SyphonStream(serverName: "")
+                    self.streams[index] = SyphonStream()
                 }
             }
         }
@@ -78,6 +78,18 @@ class SyphonManager: ObservableObject {
         discoverServers()
     }
 
+    func addStream(_ stream: SyphonStream) {
+        streams.append(stream)
+    }
+    
+    func removeStream(at index: Int) {
+        streams.remove(at: index)
+    }
+    
+    func updateStreams(_ newStreams: [SyphonStream]) {
+        streams = newStreams
+    }
+    
     func discoverServers() {
         guard let servers = serverBrowser?.servers(matchingName: nil, appName: nil) as? [[String: Any]] else {
             availableServers = []
@@ -90,6 +102,19 @@ class SyphonManager: ObservableObject {
                 return nil
             }
             return "\(appName): \(name)"
+        }
+    }
+    
+    func createClient(for stream: SyphonStream) {
+        if let oldClient = stream.client {
+            oldClient.stop()
+            stream.client = nil
+        }
+        if !stream.serverName.isEmpty {
+            let newClient = createClient(for: stream.serverName)
+            if newClient != nil {
+                stream.client = newClient
+            }
         }
     }
     

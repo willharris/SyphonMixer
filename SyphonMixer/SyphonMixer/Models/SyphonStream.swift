@@ -8,14 +8,35 @@
 import Foundation
 import Syphon
 
-struct SyphonStream: Identifiable, Equatable {
+class SyphonStream: Identifiable, Equatable, ObservableObject {
+    var onServerNameChange: ((String) -> Void)?
+    var onAutoFadeChange: ((Bool) -> Void)?
+
     let id = UUID()
-    var serverName: String
-    var client: SyphonMetalClient?
-    var alpha: Double = 1.0
-    var scalingMode: VideoScalingMode = .scaleToFill
-    var autoFade: Bool = false
-    
+    @Published var serverName: String {
+        didSet {
+            onServerNameChange?(serverName)
+        }
+    }
+    @Published var client: SyphonMetalClient?
+    @Published var alpha: Double
+    @Published var scalingMode: VideoScalingMode
+    @Published var autoFade: Bool {
+        didSet {
+            onAutoFadeChange?(autoFade)
+        }
+    }
+        
+    init(serverName: String = "",
+         autoFade: Bool = false,
+         alpha: Double = 1.0,
+         scalingMode: VideoScalingMode = .scaleToFill) {
+        self.serverName = serverName
+        self.autoFade = autoFade
+        self.alpha = alpha
+        self.scalingMode = scalingMode
+    }
+
     static func == (lhs: SyphonStream, rhs: SyphonStream) -> Bool {
           return lhs.id == rhs.id && lhs.serverName == rhs.serverName
     }

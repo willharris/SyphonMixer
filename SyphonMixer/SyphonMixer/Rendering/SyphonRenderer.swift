@@ -6,9 +6,22 @@
 //
 import os
 
+import Combine
 import Metal
 import Syphon
 import MetalKit
+
+
+enum SyphonRendererEvent {
+    case alphaCalculated(name: String, alpha: Float)
+}
+
+class SyphonRendererEvents: ObservableObject {
+    static let shared = SyphonRendererEvents()
+    let publisher = PassthroughSubject<SyphonRendererEvent, Never>()
+    
+    private init() {} // Singleton
+}
 
 struct FrameTexture {
     let tex: MTLTexture
@@ -218,7 +231,7 @@ class SyphonRenderer {
         logger.debug("Reset all fade states")
     }
 
-    private func updateFadeState(for textureId: ObjectIdentifier,
+    private func getAlphaForFadeState(for textureId: ObjectIdentifier,
                                  fadeAnalysis: FadeAnalysis,
                                  streamAlpha: Float,
                                  stream: SyphonStream) -> Float {
@@ -484,14 +497,18 @@ class SyphonRenderer {
                 
                 // Update alpha if auto-fade is enabled
                 if frameTexture.autoFade {
-                    alpha = updateFadeState(for: texId,
-                                            fadeAnalysis: fadeAnalysis,
-                                            streamAlpha: alpha,
-                                            stream: stream)
+                    alpha = getAlphaForFadeState(for: texId,
+                                                 fadeAnalysis: fadeAnalysis,
+                                                 streamAlpha: alpha,
+                                                 stream: stream)
                     if frameCount % logFreq == 0 && alpha != 0.0 && alpha != 1.0 {
                         print("\(frameCount) - \(stream.serverName) - Auto-fade: \(alpha)")
                     }
-                } else if alpha == 0.0 {
+//                    SyphonRendererEvents.shared.publisher.send(.alphaCalculated(name: stream.serverName, alpha: alpha))
+                }
+                
+                
+                if alpha == 0.0 {
                     // Skip rendering if alpha is 0
                     continue
                 }

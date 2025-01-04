@@ -73,10 +73,6 @@ struct SyphonMixerApp: App {
 
         Settings {
             SettingsView(
-                streams: Binding(
-                    get: { self.syphonManager.streams },
-                    set: { self.syphonManager.streams = $0 }
-                ),
                 manager: self.syphonManager
             )
             .frame(minWidth: 850)
