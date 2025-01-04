@@ -61,9 +61,9 @@ class VideoAnalyst {
     private let fadeStateQueue = DispatchQueue(label: "com.syphonmixer.fadestate")
     
     // Black frame detection parameters
-    private let BLACK_LUMINANCE_THRESHOLD: Float = 0.01  // 1% maximum brightness for black
+    private let BLACK_LUMINANCE_THRESHOLD: Float = 0.001  // 0.1% maximum brightness for black
     private let BLACK_VARIANCE_THRESHOLD: Float = 0.001  // 0.1% maximum variance for black
-    private let REQUIRED_BLACK_DURATION: TimeInterval = 0.5  // Configurable duration in seconds
+    private let REQUIRED_BLACK_DURATION: TimeInterval = 1.0  // Configurable duration in seconds
     private var blackFrameStates: [ObjectIdentifier: BlackFrameState] = [:]
     
     // Track previous fade state per texture
@@ -217,7 +217,6 @@ class VideoAnalyst {
     
     func analyzeFade(for textureId: ObjectIdentifier, frameCount: Int) -> FadeAnalysis {
         self.frameCount = frameCount
-        debug("Analyzing fade for texture \(textureId)")
         
         var localStats: [FrameStats]?
         statsQueue.sync {
@@ -292,7 +291,6 @@ class VideoAnalyst {
             
             // Only interrupt if we're getting consistently brighter
             if avgRecentChange > FADE_THRESHOLD * 0.5 {
-                let now = Date()
                 debug("Potential fade out interrupted: average brightness increasing: \(avgRecentChange) > \(FADE_THRESHOLD * 0.5)")
                 return FadeAnalysis(type: .none, confidence: 0, averageRate: 0)
             }
@@ -346,7 +344,6 @@ class VideoAnalyst {
             // Only proceed if confidence meets minimum threshold
             if confidence >= 0.6 {
                 if fadeType == .fadeOut {
-                    let now = Date()
                     debug("Potential fade out detected with confidence \(confidence)")
                     return FadeAnalysis(type: .potentialFadeOut, confidence: confidence, averageRate: abs(avgLumChange))
                 } else {
