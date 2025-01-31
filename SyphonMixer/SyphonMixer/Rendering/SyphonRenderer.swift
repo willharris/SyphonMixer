@@ -12,17 +12,6 @@ import Syphon
 import MetalKit
 
 
-enum SyphonRendererEvent {
-    case alphaCalculated(name: String, alpha: Float)
-}
-
-class SyphonRendererEvents: ObservableObject {
-    static let shared = SyphonRendererEvents()
-    let publisher = PassthroughSubject<SyphonRendererEvent, Never>()
-    
-    private init() {} // Singleton
-}
-
 struct FrameTexture {
     let tex: MTLTexture
     let texId: ObjectIdentifier
@@ -504,7 +493,10 @@ class SyphonRenderer {
                     if frameCount % logFreq == 0 && alpha != 0.0 && alpha != 1.0 {
                         print("\(frameCount) - \(stream.serverName) - Auto-fade: \(alpha)")
                     }
-//                    SyphonRendererEvents.shared.publisher.send(.alphaCalculated(name: stream.serverName, alpha: alpha))
+                    let dblAlpha = Double(alpha)
+                    if dblAlpha != stream.displayAlpha {
+                        stream.displayAlpha = dblAlpha
+                    }
                 }
                 
                 

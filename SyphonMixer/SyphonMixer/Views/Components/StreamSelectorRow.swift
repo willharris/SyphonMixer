@@ -10,15 +10,19 @@ import SwiftUI
 
 
 class StreamSelectorRowModel: ObservableObject {
-    @Published var stream: SyphonStream
     @ObservedObject var manager: SyphonManager
-    
-    private var cancellables = Set<AnyCancellable>()
-    
+    @Published var stream: SyphonStream
+    @Published var displayAlpha: Double = 1.0 {
+        didSet {
+            stream.alpha = displayAlpha
+        }
+    }
+
     init(stream: SyphonStream,
          syphonManager: SyphonManager) {
         self.stream = stream
         self.manager = syphonManager
+        displayAlpha = stream.alpha
         
         stream.onServerNameChange = { [weak self] _ in
             guard let self = self else { return }
@@ -29,6 +33,10 @@ class StreamSelectorRowModel: ObservableObject {
             if enabled {
                 self?.stream.alpha = 0.0
             }
+        }
+        
+        stream.onDisplayAlphaChange = { [weak self] alpha in
+            self?.displayAlpha = alpha
         }
 
     }
@@ -78,15 +86,7 @@ struct StreamSelectorRowView: View {
 
             Text("Alpha")
             
-            Slider(value: Binding(
-                get: { model.stream.alpha },
-                set: { newValue in
-                    if (!model.stream.autoFade) {
-                        model.stream.alpha = newValue
-                        model.objectWillChange.send()
-                    }
-                }
-            ), in: 0...1)
+            Slider(value: $model.displayAlpha, in: 0...1)
             .disabled(model.stream.autoFade)
             .frame(width: 100)
 

@@ -39,11 +39,5 @@ struct SettingsView: View {
         }
         .frame(maxWidth: .infinity)
         .padding()
-//        .onChange(of: syphonManager.streams) { oldStreams, newStreams in
-//            self.handleStreamsChange(oldStreams: oldStreams, newStreams: newStreams)
-//        }
-        .onDisappear {
-            syphonManager.cleanup()
-        }
     }
 }

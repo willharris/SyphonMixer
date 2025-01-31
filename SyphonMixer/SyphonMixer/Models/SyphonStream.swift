@@ -11,6 +11,7 @@ import Syphon
 class SyphonStream: Identifiable, Equatable, ObservableObject {
     var onServerNameChange: ((String) -> Void)?
     var onAutoFadeChange: ((Bool) -> Void)?
+    var onDisplayAlphaChange: ((Double) -> Void)?
 
     let id = UUID()
     @Published var serverName: String {
@@ -20,6 +21,11 @@ class SyphonStream: Identifiable, Equatable, ObservableObject {
     }
     @Published var client: SyphonMetalClient?
     @Published var alpha: Double
+    @Published var displayAlpha: Double {
+        didSet {
+            onDisplayAlphaChange?(displayAlpha)
+        }
+    }
     @Published var scalingMode: VideoScalingMode
     @Published var autoFade: Bool {
         didSet {
@@ -34,6 +40,7 @@ class SyphonStream: Identifiable, Equatable, ObservableObject {
         self.serverName = serverName
         self.autoFade = autoFade
         self.alpha = alpha
+        self.displayAlpha = alpha
         self.scalingMode = scalingMode
     }
 
